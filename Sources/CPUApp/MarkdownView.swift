@@ -8,10 +8,17 @@ struct MarkdownView: View {
     var size: CGFloat = 14
     var color: Color = .primary
 
+    /// Chinese reads best with lines about 1.6 times the font size apart.
+    private var leading: CGFloat {
+        (size * 0.36).rounded()
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(Markdown.blocks(text).enumerated()), id: \.offset) { _, block in
+        VStack(alignment: .leading, spacing: (size * 0.8).rounded()) {
+            ForEach(Array(Markdown.blocks(text).enumerated()), id: \.offset) { index, block in
                 view(for: block)
+                    // A heading belongs to what follows it: more room above than below.
+                    .padding(.top, index > 0 && block.isHeading ? size * 0.4 : 0)
             }
         }
         .foregroundStyle(color)
@@ -24,16 +31,16 @@ struct MarkdownView: View {
         switch block {
         case .heading(let level, let text):
             MarkdownView.inline(text)
-                .font(.system(size: level <= 1 ? size + 3 : level == 2 ? size + 1 : size, weight: .semibold))
-                .padding(.top, 2)
+                .font(.system(size: level <= 1 ? size + 3 : level == 2 ? size + 1.5 : size, weight: .semibold))
+                .lineSpacing(leading * 0.6)
                 .fixedSize(horizontal: false, vertical: true)
         case .paragraph(let text):
             MarkdownView.inline(text)
                 .font(.system(size: size))
-                .lineSpacing(2)
+                .lineSpacing(leading)
                 .fixedSize(horizontal: false, vertical: true)
         case .list(let items):
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: (size * 0.45).rounded()) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(item.marker)
@@ -42,7 +49,7 @@ struct MarkdownView: View {
                             .frame(minWidth: 14, alignment: .trailing)
                         MarkdownView.inline(item.text)
                             .font(.system(size: size))
-                            .lineSpacing(2)
+                            .lineSpacing(leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.leading, CGFloat(item.depth) * 18)
@@ -64,6 +71,7 @@ struct MarkdownView: View {
                     .frame(width: 3)
                 MarkdownView.inline(text)
                     .font(.system(size: size))
+                    .lineSpacing(leading)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -107,6 +115,15 @@ struct MarkdownView: View {
     }
 }
 
+private extension MarkdownBlock {
+    var isHeading: Bool {
+        if case .heading = self {
+            return true
+        }
+        return false
+    }
+}
+
 private extension MarkdownAlignment {
     var horizontal: HorizontalAlignment {
         switch self {
@@ -120,21 +137,62 @@ private extension MarkdownAlignment {
     }
 }
 
+/// Where a scroll area should be: the view with this id, at this edge. A new `version`
+/// scrolls there again.
+struct ScrollTarget: Equatable {
+    var id: String
+    var anchor: UnitPoint
+    var version = 0
+}
+
 /// Content that takes only the height it needs, up to `maxHeight`, and scrolls beyond.
 struct FitScroll<Content: View>: View {
     /// Tallest it grows before scrolling.
     var maxHeight: CGFloat = .infinity
+    /// Scrolled into view when it appears and whenever it changes.
+    var target: ScrollTarget?
     @ViewBuilder let content: Content
     // A reference box rather than @State: this toolchain has no SwiftUI macro plugin.
     @StateObject private var contentHeight = Measured()
 
+    private static var fade: CGFloat {
+        16
+    }
+
     var body: some View {
-        ScrollView(.vertical) {
-            content
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight.value = $0 }
+        // Taller than the room: the bottom edge fades to show there is more, and the end of the
+        // content gets that much space so its last line can scroll clear of the fade.
+        let overflows = contentHeight.value > maxHeight
+        ScrollViewReader { proxy in
+            ScrollView(.vertical) {
+                content
+                    .padding(.bottom, overflows ? FitScroll.fade : 0)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight.value = $0 }
+            }
+            // A definite height: the card takes its ideal height, which a scroll view does not have.
+            .frame(height: min(max(contentHeight.value, 1), maxHeight))
+            .mask {
+                VStack(spacing: 0) {
+                    Rectangle()
+                    if overflows {
+                        LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                            .frame(height: FitScroll.fade)
+                    }
+                }
+            }
+            .onAppear { scroll(proxy, to: target) }
+            .onChange(of: target) { _, target in scroll(proxy, to: target) }
         }
-        // A definite height: the card takes its ideal height, which a scroll view does not have.
-        .frame(height: min(max(contentHeight.value, 1), maxHeight))
+    }
+
+    private func scroll(_ proxy: ScrollViewProxy, to target: ScrollTarget?) {
+        guard let target else {
+            return
+        }
+        // After this layout pass, once the new content has its height.
+        DispatchQueue.main.async {
+            proxy.scrollTo(target.id, anchor: target.anchor)
+        }
     }
 }
 

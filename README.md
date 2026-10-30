@@ -137,7 +137,8 @@ scripts/runstats.py [N]                          # 最近 N 次运行的耗时�
 .build/debug/cpuctl code shell 'cpu page https://example.com --png a.png'   # 按 code 工具的方式运行代码（含风险分档），打印返回给模型的报告
 .build/debug/cpuctl --cpu-helper help             # 能力库 cpu 的命令（脚本里直接用 cpu …）
 .build/debug/cpuctl run --no-context "…"          # 不发送窗口标题和屏幕内容，测试只用代码的任务
-.build/debug/CPUApp --render-card reply.md out.png [expanded]   # 离屏渲染完成状态的卡片（检查 Markdown 和滚动，无需录屏权限）
+.build/debug/CPUApp --render-card reply.md out.png [expanded] [docked] [session]   # 离屏渲染完成状态的卡片（session：前面还有一轮）
+.build/debug/CPUApp --render-history reply.md out.png              # 离屏渲染历史窗口（示例数据）
 .build/debug/cpuctl speech-bench a.aiff b.aiff      # 按真实语速对比各个语音识别引擎
 .build/debug/cpuctl say "已算好"                    # 测试朗读，报告多久开始出声
 .build/debug/cpuctl demo-test 七乘八                # 用脚本在计算器上模拟一次示范，学成技能

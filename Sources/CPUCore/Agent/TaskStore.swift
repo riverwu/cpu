@@ -17,6 +17,62 @@ public struct TaskRecord: Codable {
     }
 }
 
+/// One line of what CPU did, or words the user added along the way.
+public struct SessionStep: Codable, Equatable {
+    public var text: String
+    /// Words the user added (answers, interjections).
+    public var fromUser: Bool
+    /// The code a step ran, shown when the steps are opened.
+    public var detail: String?
+
+    public init(text: String, fromUser: Bool = false, detail: String? = nil) {
+        self.text = text
+        self.fromUser = fromUser
+        self.detail = detail
+    }
+}
+
+/// One exchange on the card: what the user asked, what CPU did, and its answer.
+public struct SessionTurn: Codable, Equatable {
+    public var request: String
+    public var steps: [SessionStep]
+    public var reply: String
+    public var failed: Bool
+    /// How long it took ("35.2 秒"); empty for tasks from before sessions were kept.
+    public var timing: String
+
+    public init(request: String, steps: [SessionStep] = [], reply: String = "", failed: Bool = false, timing: String = "") {
+        self.request = request
+        self.steps = steps
+        self.reply = reply
+        self.failed = failed
+        self.timing = timing
+    }
+}
+
+/// Everything said and done while the card was open, from summoning it to closing it.
+public struct SessionRecord: Codable, Equatable, Identifiable {
+    /// The start time, so that names sort by time ("2026-10-30_163109_123").
+    public let id: String
+    public var title: String
+    public let started: Date
+    public var turns: [SessionTurn]
+
+    public init(id: String? = nil, title: String, started: Date = Date(), turns: [SessionTurn] = []) {
+        self.id = id ?? SessionRecord.id(for: started)
+        self.title = title
+        self.started = started
+        self.turns = turns
+    }
+
+    public static func id(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd_HHmmss_SSS"
+        return formatter.string(from: date)
+    }
+}
+
 /// A name the user gave to a request ("日报" → the full instruction).
 public struct Shortcut: Codable {
     public let name: String
@@ -33,7 +89,7 @@ public struct Skill: Codable {
     public var createdAt: Date
 }
 
-/// Task history, shortcuts and recorded trajectories, in ~/Library/Application Support/CPU.
+/// Task history, sessions, shortcuts and recorded trajectories, in ~/Library/Application Support/CPU.
 /// Small JSON files, read once and rewritten on change; safe to use from any thread.
 public final class TaskStore {
     public static let shared = TaskStore()
@@ -75,6 +131,51 @@ public final class TaskStore {
         let items = historyItems
         lock.unlock()
         write(items, to: "history.json")
+    }
+
+    // MARK: - Sessions
+
+    /// Kept for the history window; older ones are deleted.
+    static let sessionLimit = 300
+
+    private var sessionFolder: URL {
+        directory.appendingPathComponent("sessions")
+    }
+
+    /// Saved sessions, newest first. The first call brings in the older task list (one turn
+    /// each, without steps), so the history does not start empty.
+    public func sessions() -> [SessionRecord] {
+        importHistoryIfNeeded()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return sessionFiles().compactMap { try? decoder.decode(SessionRecord.self, from: Data(contentsOf: $0)) }
+    }
+
+    /// Writes a session (again after each turn: the file holds all its turns so far).
+    public func saveSession(_ session: SessionRecord) {
+        importHistoryIfNeeded()
+        write(session, to: "sessions/\(session.id).json")
+        for file in sessionFiles().dropFirst(TaskStore.sessionLimit) {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    /// Newest first: names start with the time.
+    private func sessionFiles() -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: sessionFolder, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { $0.pathExtension == "json" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+    }
+
+    private func importHistoryIfNeeded() {
+        guard !FileManager.default.fileExists(atPath: sessionFolder.path) else {
+            return
+        }
+        try? FileManager.default.createDirectory(at: sessionFolder, withIntermediateDirectories: true)
+        for record in history {
+            let turn = SessionTurn(request: record.request, reply: record.result, failed: !record.succeeded)
+            let session = SessionRecord(title: record.title.isEmpty ? record.request : record.title, started: record.date, turns: [turn])
+            write(session, to: "sessions/\(session.id).json")
+        }
     }
 
     // MARK: - Shortcuts

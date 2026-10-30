@@ -7,14 +7,7 @@ final class PanelModel: ObservableObject {
         case idle, listening, running, asking, finished, failed, onboarding, learning
     }
 
-    struct Step: Identifiable {
-        let id: Int
-        let text: String
-        /// Words the user added (follow-ups, answers, interjections).
-        let fromUser: Bool
-        /// The code a step ran, shown when the finished steps are opened.
-        var detail: String?
-    }
+    typealias Step = SessionStep
 
     struct Permission: Identifiable {
         let id: String
@@ -31,10 +24,20 @@ final class PanelModel: ObservableObject {
     @Published var title = ""
     @Published var context: ContextSummary?
     @Published var contextIncluded = true
+    /// Earlier turns of this session, oldest first. The current turn is `prompt`, `steps`
+    /// and `reply`.
+    @Published var turns: [SessionTurn] = []
+    /// The user's words that started the current turn.
+    @Published var prompt = ""
     @Published var steps: [Step] = []
     @Published var status = ""
     @Published var reply = ""
+    /// How long the current turn took.
+    @Published var timing = ""
+    /// A note beside the result's buttons ("已存为快捷说法…").
     @Published var footer = ""
+    /// Earlier turns whose steps are open.
+    @Published var openTurns: Set<Int> = []
     @Published var level: Float = 0
     /// The microphone is open, whatever the phase (a follow-up, an answer, an interjection).
     @Published var listening = false
@@ -83,15 +86,24 @@ final class PanelModel: ObservableObject {
         !title.isEmpty
     }
 
+    /// The current turn as the history keeps it.
+    var currentTurn: SessionTurn {
+        SessionTurn(request: prompt, steps: steps, reply: reply, failed: phase == .failed, timing: timing)
+    }
+
     func reset() {
         input = ""
         title = ""
         context = nil
         contextIncluded = true
+        turns = []
+        prompt = ""
         steps = []
         status = ""
         reply = ""
+        timing = ""
         footer = ""
+        openTurns = []
         request = nil
         resultApp = nil
         attachments = []
@@ -101,8 +113,19 @@ final class PanelModel: ObservableObject {
         stepsExpanded = false
     }
 
+    /// The user goes on with the session: the finished turn joins the earlier ones.
+    func beginTurn(_ words: String) {
+        turns.append(currentTurn)
+        prompt = words
+        steps = []
+        reply = ""
+        timing = ""
+        footer = ""
+        stepsExpanded = false
+    }
+
     func addStep(_ text: String, fromUser: Bool = false) {
-        steps.append(Step(id: steps.count, text: text, fromUser: fromUser))
+        steps.append(Step(text: text, fromUser: fromUser))
     }
 
     func addDetail(_ text: String) {
@@ -131,6 +154,7 @@ struct PanelActions {
     var startLearning: () -> Void = {}
     var finishLearning: () -> Void = {}
     var cancelLearning: () -> Void = {}
+    var openHistory: () -> Void = {}
     /// The card's frame in the hosting view, which decides where clicks fall through.
     var cardFrame: (CGRect) -> Void = { _ in }
     /// The mic button: start listening, or finish what is being said.
@@ -186,6 +210,8 @@ struct PanelView: View {
 
     /// Room around the card for its shadow; the window is the card plus this margin.
     static let margin: CGFloat = 20
+    /// At the side of the screen: wide enough for about 33 Chinese characters a line.
+    static let dockedWidth: CGFloat = 520
 
     var body: some View {
         Group {
@@ -218,7 +244,7 @@ struct PanelView: View {
                 starter
             }
         }
-        .frame(width: model.docked ? 460 : 640, alignment: .topLeading)
+        .frame(width: model.docked ? PanelView.dockedWidth : 640, alignment: .topLeading)
         // Its own height, whatever the window's: the window is resized to fit the card.
         .fixedSize(horizontal: false, vertical: true)
         .overlay(
@@ -313,25 +339,12 @@ struct PanelView: View {
             Spacer(minLength: 0)
             if model.phase == .running {
                 ProgressView().controlSize(.small)
-                Button(action: actions.collapse) {
-                    Image(systemName: "chevron.up")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("收起，只显示进度")
+                headerButton("chevron.up", help: "收起，只显示进度", action: actions.collapse)
             } else {
-                Button(action: actions.close) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
+                if model.phase != .onboarding, model.phase != .learning {
+                    headerButton("clock.arrow.circlepath", help: "历史记录", action: actions.openHistory)
                 }
-                .buttonStyle(.plain)
-                .help("关闭（Fn Fn 或 Esc）")
+                headerButton("xmark", help: "关闭（Fn Fn 或 Esc）", action: actions.close)
             }
         }
         .padding(.horizontal, 18)
@@ -350,6 +363,42 @@ struct PanelView: View {
         }
         .buttonStyle(.plain)
         .help(model.listening ? "说完了" : "点一下说话（也可以按住 Fn 说）")
+    }
+
+    /// A round button at the card's top right, solid enough to find on the gray card.
+    private func headerButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Color.primary.opacity(0.7))
+                .frame(width: 26, height: 26)
+                .background(Color.primary.opacity(0.09), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    /// The field under a result or a question: a box that reads as a place to type, with the
+    /// mic at its end. It lights up while it has the keyboard or the microphone.
+    private func composer(_ placeholder: String, size: CGFloat = 14) -> some View {
+        let active = fieldFocused || model.listening
+        return HStack(spacing: 8) {
+            inputField(placeholder, size: size)
+            micButton
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 5)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor).opacity(0.85))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(active ? Color.accentColor.opacity(0.85) : Color.primary.opacity(0.18), lineWidth: active ? 1.5 : 1)
+        )
+        .animation(.easeOut(duration: 0.15), value: active)
     }
 
     private func inputField(_ placeholder: String, size: CGFloat) -> some View {
@@ -484,39 +533,27 @@ struct PanelView: View {
     // MARK: - Task
 
     private var taskBody: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !model.steps.isEmpty {
-                if model.phase == .finished || model.phase == .failed || model.isProposingEdits {
-                    foldedSteps
-                } else {
-                    // While it works, the latest steps show what is happening.
-                    VStack(alignment: .leading, spacing: 4) {
-                        if model.steps.count > 6 {
-                            Text("… 前面还有 \(model.steps.count - 6) 步")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                        }
-                        ForEach(model.steps.suffix(6)) { step in
-                            stepLine(step)
-                        }
-                    }
-                }
+        VStack(alignment: .leading, spacing: 12) {
+            if hasTranscript {
+                transcript
             }
             switch model.phase {
             case .running:
-                if !model.status.isEmpty {
-                    Text(model.status)
-                        .font(.system(size: 12))
+                VStack(alignment: .leading, spacing: 4) {
+                    if !model.status.isEmpty {
+                        Text(model.status)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                    Text("Esc 停止 · Fn Fn 收起 · 按住 Fn 插话")
+                        .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
-                        .lineLimit(1)
                 }
-                Text("Esc 停止 · Fn Fn 收起 · 按住 Fn 插话")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
             case .asking:
                 asking
             case .finished, .failed:
-                result
+                resultControls
             case .learning:
                 HStack(spacing: 8) {
                     Button("学好了", action: actions.finishLearning)
@@ -535,54 +572,66 @@ struct PanelView: View {
         .padding(.vertical, 12)
     }
 
-    private func stepLine(_ step: PanelModel.Step) -> some View {
-        Text(step.fromUser ? "你：\(step.text)" : "✓ \(step.text)")
-            .font(.system(size: 13))
-            .foregroundStyle(step.fromUser ? Color.accentColor : Color.secondary)
-            .lineLimit(1)
-            .truncationMode(.tail)
+    // MARK: - Transcript
+
+    private static let currentTurnID = "current"
+    private static let endID = "end"
+
+    /// The whole session: earlier turns, then the current one, in one scrolling column.
+    private var transcript: some View {
+        FitScroll(maxHeight: transcriptMaxHeight, target: scrollTarget) {
+            VStack(alignment: .leading, spacing: 16) {
+                ForEach(Array(model.turns.enumerated()), id: \.offset) { index, turn in
+                    TurnView(turn: turn, showsPrompt: index > 0 || turn.request != model.title, expanded: openTurn(index))
+                    Divider().opacity(0.6)
+                }
+                VStack(spacing: 0) {
+                    TurnView(turn: model.currentTurn, showsPrompt: showsCurrentPrompt, live: live, expanded: $model.stepsExpanded)
+                    Color.clear.frame(height: 1).id(PanelView.endID)
+                }
+                .id(PanelView.currentTurnID)
+            }
+            .padding(.trailing, 8)
+        }
     }
 
-    /// Done: the steps fold into one line that opens on click, so the result comes first.
-    private var foldedSteps: some View {
-        let actions = model.steps.filter { !$0.fromUser }.count
-        return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    model.stepsExpanded.toggle()
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .rotationEffect(.degrees(model.stepsExpanded ? 90 : 0))
-                    Text(actions == 0 ? "过程" : "做了 \(actions) 步操作")
-                }
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if model.stepsExpanded {
-                FitScroll(maxHeight: 240) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(model.steps) { step in
-                            stepLine(step)
-                            if let detail = step.detail {
-                                Text(detail)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                                    .padding(6)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.05)))
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+    private var hasTranscript: Bool {
+        !model.turns.isEmpty || !model.steps.isEmpty || !model.reply.isEmpty || showsCurrentPrompt
+    }
+
+    /// The first request is the card's title until the model names the task; no need to say it twice.
+    private var showsCurrentPrompt: Bool {
+        !model.prompt.isEmpty && (!model.turns.isEmpty || model.prompt != model.title)
+    }
+
+    /// Working (or asking): the latest steps show; once done they fold under the answer.
+    private var live: Bool {
+        model.phase != .finished && model.phase != .failed && !model.isProposingEdits
+    }
+
+    /// A question needs the room: the session above it stays short.
+    private var transcriptMaxHeight: CGFloat {
+        model.phase == .asking ? min(200, model.resultMaxHeight * 0.45) : model.resultMaxHeight
+    }
+
+    /// Done: the latest turn from its start, so its answer reads from the top. Working: the end.
+    private var scrollTarget: ScrollTarget {
+        live
+            ? ScrollTarget(id: PanelView.endID, anchor: .bottom, version: model.turns.count * 10_000 + model.steps.count)
+            : ScrollTarget(id: PanelView.currentTurnID, anchor: .top, version: model.turns.count * 10_000)
+    }
+
+    private func openTurn(_ index: Int) -> Binding<Bool> {
+        Binding(
+            get: { model.openTurns.contains(index) },
+            set: { open in
+                if open {
+                    model.openTurns.insert(index)
+                } else {
+                    model.openTurns.remove(index)
                 }
             }
-        }
+        )
     }
 
     @ViewBuilder
@@ -599,7 +648,7 @@ struct PanelView: View {
                     }
                 }
             }
-            inputField("说出或输入你的回答…", size: 15)
+            composer("说出或输入你的回答…", size: 15)
         case .confirm(let action, let details):
             Label(action, systemImage: "exclamationmark.bubble")
                 .font(.system(size: 15, weight: .semibold))
@@ -622,7 +671,7 @@ struct PanelView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
-            inputField("要修改什么？", size: 13)
+            composer("要修改什么？")
         case .handOver(let instruction):
             Label(instruction, systemImage: "hand.raised")
                 .font(.system(size: 15, weight: .semibold))
@@ -645,7 +694,7 @@ struct PanelView: View {
         Label(summary, systemImage: "pencil.line")
             .font(.system(size: 15, weight: .semibold))
             .fixedSize(horizontal: false, vertical: true)
-        FitScroll(maxHeight: model.resultMaxHeight) {
+        FitScroll(maxHeight: max(160, model.resultMaxHeight - 200)) {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(edits.enumerated()), id: \.offset) { index, edit in
                     HStack(alignment: .top, spacing: 8) {
@@ -687,16 +736,12 @@ struct PanelView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
         }
-        inputField("要怎么调整？", size: 13)
+        composer("要怎么调整？")
     }
 
-    private var result: some View {
+    /// Under the answer: what to do with the result, and the field to go on with the session.
+    private var resultControls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Long replies (tables, lists) scroll inside the card instead of stretching it.
-            FitScroll(maxHeight: model.resultMaxHeight) {
-                MarkdownView(text: model.reply, size: 14, color: model.phase == .failed ? .red : .primary)
-                    .padding(.trailing, 6)
-            }
             HStack(spacing: 8) {
                 if let app = model.resultApp {
                     Button("打开\(app)", action: actions.openResult)
@@ -719,15 +764,11 @@ struct PanelView: View {
             if !model.attachments.isEmpty {
                 HStack(spacing: 6) { attachmentChips }
             }
-            HStack(spacing: 8) {
-                inputField(
-                    model.namingSkill ? "给这个技能起个名字，比如“发周报”，回车保存"
-                        : model.namingShortcut ? "给它起个名字，比如“日报”，回车保存"
-                        : model.listening ? "正在听…说完会自动继续" : "说话或输入，继续这个任务…",
-                    size: 14
-                )
-                micButton
-            }
+            composer(
+                model.namingSkill ? "给这个技能起个名字，比如“发周报”，回车保存"
+                    : model.namingShortcut ? "给它起个名字，比如“日报”，回车保存"
+                    : model.listening ? "正在听…说完会自动继续" : "说话或输入，继续这个任务…"
+            )
         }
     }
 

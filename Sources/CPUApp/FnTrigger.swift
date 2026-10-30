@@ -48,6 +48,10 @@ final class FnTrigger {
     }
 
     private func handle(_ event: NSEvent) {
+        // Keys other programs post are not the user's: they neither tap Fn nor make a chord.
+        guard event.postingProcess == nil else {
+            return
+        }
         let input: FnTapDetector.Input
         if event.type == .flagsChanged, FnTrigger.fnKeyCodes.contains(event.keyCode) {
             input = event.modifierFlags.contains(.function) ? .fnDown : .fnUp
@@ -77,5 +81,16 @@ final class FnTrigger {
         case nil:
             break
         }
+    }
+}
+
+extension NSEvent {
+    /// The other program that posted this event, or nil when it came from the keyboard
+    /// (hardware events carry source pid 0) or from CPU itself.
+    var postingProcess: pid_t? {
+        guard let pid = cgEvent?.getIntegerValueField(.eventSourceUnixProcessID), pid != 0, pid != Int64(getpid()) else {
+            return nil
+        }
+        return pid_t(pid)
     }
 }

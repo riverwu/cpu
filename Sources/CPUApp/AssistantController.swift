@@ -64,8 +64,10 @@ final class AssistantController {
     private var started = Date()
     /// The request that started the current task, for "retry".
     private var taskRequest = ""
-    /// Steps already on the card when the current turn started (follow-ups add to them).
-    private var turnStartSteps = 0
+    /// The history entry this card writes after each turn; nil until the first turn starts.
+    private var sessionID: String?
+    private var sessionStarted = Date()
+    private let history = HistoryWindow()
     /// Time spent waiting for the user's answers this turn, left out of the card's timing.
     private var waited: TimeInterval = 0
     private var askedAt: Date?
@@ -112,6 +114,7 @@ final class AssistantController {
         actions.finishLearning = { [weak self] in self?.finishLearning() }
         actions.cancelLearning = { [weak self] in self?.cancelLearning() }
         actions.toggleListening = { [weak self] in self?.toggleListening() }
+        actions.openHistory = { [weak self] in self?.showHistory() }
         actions.stop = { Interrupts.stop() }
         actions.expand = { [weak self] in self?.model.compact = false }
         actions.collapse = { [weak self] in self?.model.compact = true }
@@ -191,6 +194,9 @@ final class AssistantController {
         Interrupts.onStop = { [weak self] in
             self?.model.status = "正在停止…"
             self?.resolveAnswer(nil)
+        }
+        history.onRerun = { [weak self] request in
+            self?.run(request: request)
         }
         installKeyMonitor()
     }
@@ -306,8 +312,37 @@ final class AssistantController {
         default:
             model.reset()
             model.phase = .idle
-            agent.endSession()
+            endSession()
         }
+    }
+
+    /// The card's conversation is over: the agent forgets it, and the next turn starts a new
+    /// history entry.
+    private func endSession() {
+        agent.endSession()
+        sessionID = nil
+    }
+
+    /// Writes this card's whole session (all its turns so far) for the history window.
+    private func saveSession() {
+        if sessionID == nil {
+            sessionID = SessionRecord.id(for: started)
+            sessionStarted = started
+        }
+        guard let sessionID else {
+            return
+        }
+        let session = SessionRecord(id: sessionID, title: model.title, started: sessionStarted, turns: model.turns + [model.currentTurn])
+        TaskStore.shared.saveSession(session)
+        history.saved(session)
+    }
+
+    /// An empty card makes way for the history window; one with a task stays.
+    func showHistory() {
+        if panel.isVisible, !model.hasTask, model.phase == .idle || model.phase == .listening {
+            close()
+        }
+        history.show()
     }
 
     /// Holding Fn talks whenever the open card can take words, including over a running task.
@@ -409,7 +444,7 @@ final class AssistantController {
         place()
         model.recents = Array(TaskStore.shared.history.prefix(3))
         model.shortcuts = TaskStore.shared.shortcuts
-        agent.endSession()
+        endSession()
         // Observe the user's window and warm the connection while they speak.
         agent.prepare()
         show(focus: true)
@@ -452,7 +487,9 @@ final class AssistantController {
         guard let visible = screen?.visibleFrame else {
             return
         }
-        model.resultMaxHeight = max(160, min(340, visible.height - 480))
+        // A whole session reads in the card: up to most of the screen, leaving room for the
+        // title above and the buttons and input below.
+        model.resultMaxHeight = max(200, min(560, visible.height - 320))
         if !model.docked {
             anchor = NSPoint(x: visible.midX, y: visible.maxY - visible.height * 0.06)
         } else if let saved = UserDefaults.standard.string(forKey: AssistantController.dockKey).map(NSPointFromString),
@@ -473,7 +510,7 @@ final class AssistantController {
             return
         }
         let margin = PanelView.margin
-        let size = shownSize == .zero ? CGSize(width: model.docked ? 460 : 640, height: 80) : shownSize
+        let size = shownSize == .zero ? CGSize(width: model.docked ? PanelView.dockedWidth : 640, height: 80) : shownSize
         let width = size.width + 2 * margin
         let height = size.height + 2 * margin
         let x = model.docked ? anchor.x + margin - width : anchor.x - width / 2
@@ -592,11 +629,18 @@ final class AssistantController {
             guard let self, event.window === self.panel else {
                 return event
             }
+            // While listening, a key another program posted is not the user typing: Gemini
+            // answers the same Fn double-tap with one, which used to end listening at once.
+            if self.speech.isRunning, let source = event.postingProcess {
+                helperLog(.info, "dropped key \(event.keyCode) posted by pid \(source) while listening")
+                return nil
+            }
             if event.keyCode == 53 {
                 self.escapePressed()
                 return nil
             }
             if self.speech.isRunning, event.keyCode != 36 {
+                helperLog(.info, "key \(event.keyCode) typed: listening ends")
                 self.speech.cancel()
                 self.stopSilenceTimer()
                 self.model.level = 0
@@ -667,7 +711,7 @@ final class AssistantController {
                 model.footer = "已存为快捷说法「\(text)」"
                 return
             }
-            model.addStep(text, fromUser: true)
+            model.beginTurn(text)
             run(text, followUp: true)
         case .idle, .listening:
             guard !text.isEmpty else {
@@ -690,15 +734,15 @@ final class AssistantController {
             // Starting over from a finished card: a new task, not a follow-up.
             let files = model.attachments
             model.reset()
-            agent.endSession()
+            endSession()
             attach(files)
         }
         let request = TaskStore.shared.expand(words) ?? words
         taskRequest = request
         model.title = request
-        if request != words {
-            model.addStep(words, fromUser: true)
-        }
+        model.prompt = words
+        sessionID = SessionRecord.id(for: Date())
+        sessionStarted = Date()
         run(request, followUp: false)
     }
 
@@ -734,7 +778,6 @@ final class AssistantController {
         onRunningChanged(true)
         started = Date()
         waited = 0
-        turnStartSteps = model.steps.count
         Task { [agent] in
             await agent.run(text, followUp: followUp)
         }
@@ -753,7 +796,8 @@ final class AssistantController {
         let title = model.title
         model.reset()
         model.title = title
-        agent.endSession()
+        model.prompt = request
+        endSession()
         run(request, followUp: false)
     }
 
@@ -778,7 +822,7 @@ final class AssistantController {
         }
         stopSilenceTimer()
         model.reset()
-        agent.endSession()
+        endSession()
         model.title = "正在学习：请在你的应用里做一遍"
         model.phase = .learning
         // Give the keyboard back to the user's app: the card stays visible but not key.
@@ -789,7 +833,7 @@ final class AssistantController {
         panel.acceptsKey = true
         panel.orderFrontRegardless()
         agent.startDemonstration { [weak self] steps in
-            self?.model.steps = steps.enumerated().map { PanelModel.Step(id: $0.offset, text: $0.element.words, fromUser: false) }
+            self?.model.steps = steps.map { PanelModel.Step(text: $0.words) }
         }
     }
 
@@ -850,8 +894,7 @@ final class AssistantController {
             return
         }
         speaker.stop()
-        model.addStep("撤销", fromUser: true)
-        model.reply = ""
+        model.beginTurn("撤销")
         model.canUndo = false
         model.status = "正在撤销…"
         model.phase = .running
@@ -860,7 +903,6 @@ final class AssistantController {
         onRunningChanged(true)
         started = Date()
         waited = 0
-        turnStartSteps = model.steps.count
         Task { [agent] in
             await agent.undo()
         }
@@ -912,11 +954,12 @@ final class AssistantController {
             model.reply = text
             model.status = ""
             model.input = ""
-            let actions = model.steps.dropFirst(turnStartSteps).filter { !$0.fromUser }.count
-            model.footer = String(format: "%.1f 秒 · %d 个动作", Date().timeIntervalSince(started) - waited, actions)
+            model.timing = String(format: "%.1f 秒", Date().timeIntervalSince(started) - waited)
+            model.footer = ""
             model.resultApp = agent.resultWindow?.app
             model.canUndo = agent.canUndo
             model.phase = failed ? .failed : .finished
+            saveSession()
             dock(compact: false)
             if !taskRequest.isEmpty, text != "已停止。" {
                 TaskStore.shared.record(TaskRecord(request: taskRequest, title: model.title, result: text, succeeded: !failed, date: Date()))

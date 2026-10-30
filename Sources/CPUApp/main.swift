@@ -46,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recent.submenu = NSMenu(title: "最近任务")
         recent.submenu?.delegate = self
         menu.addItem(recent)
+        let history = NSMenuItem(title: "历史记录…", action: #selector(showHistory), keyEquivalent: "")
+        history.target = self
+        menu.addItem(history)
         menu.addItem(.separator())
         let permissions = NSMenuItem(title: "权限设置…", action: #selector(openPermissions), keyEquivalent: "")
         permissions.target = self
@@ -102,6 +105,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showPanel() {
         controller.toggleFromMenu()
+    }
+
+    @objc private func showHistory() {
+        controller.showHistory()
     }
 
     @objc private func openPermissions() {
