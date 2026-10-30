@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.cpu.assistant</string>
+	<key>CFBundleName</key>
+	<string>CPU</string>
+	<key>CFBundleDisplayName</key>
+	<string>CPU</string>
+	<key>CFBundleExecutable</key>
+	<string>CPU</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>CPU 运行你交给它的任务时，会用脚本控制相关的应用（例如生成文件、批量整理邮件）。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>CPU 通过麦克风接收你的语音指令。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>CPU 在本机把你的语音转成文字指令。</string>
+</dict>
+</plist>
