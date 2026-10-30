@@ -41,6 +41,8 @@ public enum CodeSafety {
         Rule(pattern: #"\bbrew\s+(install|uninstall|reinstall|upgrade)\b|\bpip3?\s+install\b|\bnpm\s+(install|i)\s+(-g|--global)\b|\bgem\s+install\b|\bsoftwareupdate\b|"# + command + #"installer\s"#, reason: "安装或卸载软件"),
         Rule(pattern: #"\bos\.(remove|unlink|rmdir)\(|\bshutil\.rmtree\(|\.unlink\(|/bin/rm\s|"# + command + #"unlink\s"#, reason: "删除文件"),
         Rule(pattern: #"\bempty\s+(the\s+)?trash\b"#, reason: "清空废纸篓（不能撤销）"),
+        // The clipboard is the user's; reading it (pbpaste) is fine.
+        Rule(pattern: command + #"pbcopy\b|\bset\s+the\s+clipboard\s+to\b|\.setTheClipboardTo\(|NSPasteboard[^\n]*\b(setString|setData|writeObjects|clearContents|declareTypes)\b|\bpyperclip\.copy\("#, reason: "写入剪贴板（会替换你复制的内容）"),
         Rule(pattern: command + #"(kill|killall|pkill)\s|tell\s+application\s+"[^"]*"\s+to\s+quit\b|(?m)^\s*quit(\s+saving\s+\w+)?\s*$|\.quit\(\)"#, reason: "退出应用或结束进程（未保存的内容可能丢失）"),
         // Changing many objects of an app at once: every/whose or a loop, together with a change.
         // `set x to … every …` only reads; `set <property> of … to …` writes.

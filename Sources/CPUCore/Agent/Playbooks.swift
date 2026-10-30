@@ -17,7 +17,7 @@ enum Playbooks {
         ], guide: """
         Improving the user's own writing. They expect to see what would change and decide; the \
         original is never lost and its formatting stays.
-        1. `read` the whole text.
+        1. `read_window` the whole text.
         2. `propose_edits`: the fewest changes that achieve the goal and a one-line summary. \
         Keep each `original` short (the words that change plus enough to be unique, under \
         about 60 characters; split a long sentence into several edits) and copied exactly. \
@@ -35,7 +35,7 @@ enum Playbooks {
             "检查", "校对", "错别字", "语法", "拼写", "有没有错", "proofread", "grammar", "typo"
         ], guide: """
         Checking a text. The user expects a list of problems, not changes.
-        1. `read` the whole text.
+        1. `read_window` the whole text.
         2. Reply with the problems: a table of where (paragraph or the first words), the \
         original, the fix and why. Say plainly when you found none.
         3. Change nothing. If they then say "改吧", treat it as editing: `propose_edits` with \
@@ -46,7 +46,7 @@ enum Playbooks {
         - A web page: use the browser's own translation (Chrome: right-click the page ▸ 翻译成 \
         中文, or the translate icon at the right of the address bar), which keeps the page and \
         its layout.
-        - A document or selection: `read` it; give the translation in your reply when it is \
+        - A document or selection: `read_window` it (a file: `read_file`); give the translation in your reply when it is \
         short (about a screen), otherwise put it in a new document next to the original \
         (never overwrite the original) and say where it is.
         """),
@@ -54,7 +54,7 @@ enum Playbooks {
             "总结", "概括", "摘要", "讲了什么", "说了什么", "分析", "对不对", "怎么选", "解读", "要点", "summarize", "analy"
         ], guide: """
         Understanding a document, page or table. The user wants an answer they can trust.
-        - `read` it whole first instead of scrolling; open the source when they ask you to \
+        - `read_window` it whole first instead of scrolling (a file: `read_file`); open the source when they ask you to \
         check against one.
         - Answer with the conclusion first, then the evidence and where it is (section, page, \
         row, figure). Mark what is your inference.

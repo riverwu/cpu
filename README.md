@@ -73,7 +73,7 @@ Sources/
     Input             后台优先的点击/输入/按键；必要时短暂切到前台再操作
     Capture           ScreenCaptureKit 窗口截图
     TextRecognition   Vision OCR（本机）：AX 信息太少时，把屏幕文字变成可点击坐标
-    BackgroundInput   不抢前台的后台点击、菜单快捷键、粘贴；借用前台的规矩
+    BackgroundInput   不抢前台的后台点击、菜单快捷键；借用前台的规矩（从不碰剪贴板）
     Demonstration     示范录制：把用户的点击、按键、输入记成带文字标签的步骤
   CPUCore/Voice/      语音
     Transcriber       识别后端：豆包流式、Apple SpeechAnalyzer、Apple SFSpeech
@@ -133,6 +133,7 @@ swift build
 .build/debug/cpuctl act <窗口id> '[{"do":"click","target":"文件格式"},{"do":"click","target":"PDF"}]'   # 按模型的方式执行一次 act（不调用模型），看每步做了什么
 .build/debug/cpuctl act <窗口id> '[{"do":"menu","path":"格式 ▸ 字体"}]'   # 列出或选择菜单栏命令
 .build/debug/cpuctl read <窗口id|网址>              # 读窗口全文，或在后台打开网页并读全文
+.build/debug/cpuctl read-file <路径>                 # 读文件的文字（文本、rtf/doc/docx/odt/html、PDF）
 scripts/runstats.py [N]                          # 最近 N 次运行的耗时、步数、报错、思考字数汇总
 .build/debug/cpuctl code shell 'cpu page https://example.com --png a.png'   # 按 code 工具的方式运行代码（含风险分档），打印返回给模型的报告
 .build/debug/cpuctl --cpu-helper help             # 能力库 cpu 的命令（脚本里直接用 cpu …）

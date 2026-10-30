@@ -7,17 +7,19 @@ enum FullText {
     struct Result {
         let text: String
         /// The window has a document body that keeps its text from accessibility (Word's
-        /// layout area), so copying it is the way to read it.
+        /// layout area): its app has to hand the text over another way.
         let opaqueDocument: Bool
-        /// That body, to give it keyboard focus before copying.
-        var body: AXUIElement? = nil
+        /// False when reading stopped at the size, node or time limit before the end.
+        var complete = true
+        /// The text view holds only what is on screen (editors that load lines as they
+        /// scroll): the share of the document its scroll bar says is visible.
+        var visibleShare: Double?
     }
 
-    static func collect(from window: AXUIElement, limit: Int, timeBudget: TimeInterval = 3) -> Result {
+    static func collect(from window: AXUIElement, limit: Int, timeBudget: TimeInterval = 8) -> Result {
         let started = Date()
         var candidates: [(element: AXUIElement, role: String, length: Int, area: CGFloat)] = []
         var opaque = false
-        var body: AXUIElement?
         var visited = 0
         // Find the content: the longest text area, else the largest web area.
         func find(_ element: AXUIElement, depth: Int) {
@@ -39,7 +41,6 @@ enum FullText {
             case "AXLayoutArea":
                 if (values[kAXChildrenAttribute] as? [AXUIElement] ?? []).isEmpty, size.width * size.height > 40_000 {
                     opaque = true
-                    body = body ?? element
                 }
             default:
                 break
@@ -52,13 +53,19 @@ enum FullText {
 
         if let area = candidates.filter({ $0.role == "AXTextArea" }).max(by: { $0.length < $1.length }), area.length >= 200,
            let value = AX.string(area.element, kAXValueAttribute) {
-            return Result(text: truncateText(value, limit: limit), opaqueDocument: false)
+            return Result(text: String(value.prefix(limit)), opaqueDocument: false, complete: value.count <= limit,
+                          visibleShare: visibleShare(of: area.element))
         }
         let root = candidates.filter { $0.role == "AXWebArea" }.max(by: { $0.area < $1.area })?.element ?? window
         var pieces = Joiner(limit: limit)
         var nodes = 0
+        var stopped = false
         func gather(_ element: AXUIElement, depth: Int) {
-            guard depth < 60, nodes < 25_000, !pieces.full, Date().timeIntervalSince(started) < timeBudget else {
+            guard depth < 60, !stopped else {
+                return
+            }
+            guard nodes < 200_000, !pieces.full, Date().timeIntervalSince(started) < timeBudget else {
+                stopped = true
                 return
             }
             nodes += 1
@@ -81,7 +88,30 @@ enum FullText {
             }
         }
         gather(root, depth: 0)
-        return Result(text: pieces.text, opaqueDocument: opaque, body: body)
+        return Result(text: pieces.text, opaqueDocument: opaque && pieces.text.count < 200, complete: !stopped)
+    }
+
+    /// For a text view inside a scroll area that is no taller than the area itself (so it
+    /// holds only what is on screen), the share of the document the scroll bar shows. Nil when
+    /// the view holds the whole document, or there is nothing to tell.
+    static func visibleShare(of element: AXUIElement) -> Double? {
+        var current = element
+        for _ in 0..<4 {
+            guard let parent = AX.element(current, kAXParentAttribute) else {
+                return nil
+            }
+            if AX.role(parent) == "AXScrollArea" {
+                guard let area = AX.frame(parent), let view = AX.frame(element), view.height <= area.height * 1.3,
+                      let bar = AX.element(parent, kAXVerticalScrollBarAttribute), let track = AX.frame(bar), track.height > 0,
+                      let thumb = AX.elements(bar, kAXChildrenAttribute).first(where: { AX.role($0) == "AXValueIndicator" }).flatMap(AX.frame) else {
+                    return nil
+                }
+                let share = Double(thumb.height / track.height)
+                return share < 0.6 ? share : nil
+            }
+            current = parent
+        }
+        return nil
     }
 
     /// Joins text pieces into lines by their position: a piece below the previous one starts a
@@ -89,6 +119,8 @@ enum FullText {
     struct Joiner {
         let limit: Int
         private(set) var text = ""
+        /// Kept as it grows: counting a long String each time would be quadratic.
+        private var count = 0
         private var lastFrame: CGRect?
 
         init(limit: Int) {
@@ -96,7 +128,7 @@ enum FullText {
         }
 
         var full: Bool {
-            text.count >= limit
+            count >= limit
         }
 
         mutating func add(_ raw: String, frame: CGRect?) {
@@ -110,17 +142,17 @@ enum FullText {
                     if let previous = text.last, let next = piece.first, previous.isASCII, next.isASCII,
                        previous.isLetter || previous.isNumber || previous == ",", next.isLetter || next.isNumber {
                         text += " "
+                        count += 1
                     }
                 } else {
                     text += "\n"
+                    count += 1
                 }
             }
             text += piece
+            count += piece.count
             if let frame {
                 lastFrame = frame
-            }
-            if text.count > limit {
-                text = String(text.prefix(limit)) + "…"
             }
         }
     }

@@ -166,60 +166,79 @@ public final class Computer: @unchecked Sendable {
         return describeSheets(WindowCatalog.list())
     }
 
+    /// A window's text as `readText` found it.
+    public struct WindowText {
+        public let text: String
+        /// accessibility, app_script (the app's own scripting) or saved_file.
+        public let method: String
+        public let window: WindowRecord
+        /// The file the window shows, when it has one.
+        public let document: String?
+        /// How complete the text is, when that is in doubt.
+        public let notes: [String]
+    }
+
     /// The whole text of a window's page or document, including what is scrolled out of view,
-    /// as a screen reader reads it. Apps that keep their document text from accessibility
-    /// (Word) are read the way a person hands text over: Select All, Copy; then the selection
-    /// collapses and the clipboard is put back. `method` says which happened.
-    public func readText(_ requested: WindowRecord, limit: Int = 60_000) throws -> (text: String, method: String, window: WindowRecord) {
-        let record = frontSurface(of: requested) ?? requested
+    /// as a screen reader reads it. A page still loading is waited for. Apps that keep their
+    /// document text from accessibility (Word) are asked through their own scripting, else
+    /// the saved file is read. Never through the clipboard: it is the user's.
+    public func readText(_ requested: WindowRecord, limit: Int = 2_000_000) throws -> WindowText {
+        var record = frontSurface(of: requested) ?? requested
         guard let window = AX.windowElement(for: record) else {
             throw HelperError("\(record.app) does not expose this window to accessibility; read it from screenshots instead.")
         }
-        let found = FullText.collect(from: window, limit: limit)
-        if found.text.count >= 200 || !found.opaqueDocument {
-            return (found.text, "accessibility", record)
+        let deadline = Date().addingTimeInterval(10)
+        var waited = false
+        while let area = Computer.webArea(in: window), AX.bool(area, "AXLoaded") == false, Date() < deadline, !Interrupts.isStopped {
+            waited = true
+            Thread.sleep(forTimeInterval: 0.3)
         }
-        // Select All in a search or name field would take only that field: give the document
-        // body keyboard focus first.
-        let singleLine: Set<String> = ["AXTextField", "AXComboBox", "AXSearchField"]
-        var field = AX.focusedElement(pid: record.pid).flatMap { singleLine.contains(AX.role($0)) ? $0 : nil }
-        if field != nil, let body = found.body {
-            AX.set(body, kAXFocusedAttribute, kCFBooleanTrue)
-            usleep(80_000)
-            field = AX.focusedElement(pid: record.pid).flatMap { singleLine.contains(AX.role($0)) ? $0 : nil }
+        var found = FullText.collect(from: window, limit: limit)
+        // Just loaded: a page that builds itself with script may need a moment more.
+        while waited, found.text.count < 300, Date() < deadline, !Interrupts.isStopped {
+            Thread.sleep(forTimeInterval: 0.8)
+            found = FullText.collect(from: window, limit: limit)
         }
-        if let field {
-            let name = [kAXTitleAttribute, kAXDescriptionAttribute].lazy.compactMap { AX.string(field, $0) }.first { !$0.isEmpty } ?? AX.role(field)
-            throw HelperError("Keyboard focus is in the field \"\(name)\", so Select All would copy only that field. Click into the document body, then read again.")
+        if waited, let fresh = WindowCatalog.find(id: Int(record.id)) {
+            record.title = fresh.title
         }
-        guard let copied = BackgroundInput.copyAll(pid: record.pid), !copied.isEmpty else {
-            throw HelperError("Could not read the document text of \(record.app). Scroll through it and read the screenshots instead.")
+        let document = AX.string(window, "AXDocument").flatMap { URL(string: $0) }.flatMap { $0.isFileURL ? $0 : nil }
+        if found.opaqueDocument {
+            return try readOpaque(record, document: document)
         }
-        // Collapse the selection so that nothing typed later replaces the whole document.
-        _ = try? handle(method: "press_key", params: ["window": ["id": Int(record.id)], "key": "left"])
-        return (truncateText(copied, limit: limit), "select_all_copy", record)
+        var notes: [String] = []
+        if !found.complete {
+            notes.append("Reading stopped before the end of this very long page or document: this is its beginning.")
+        }
+        if let share = found.visibleShare {
+            let rest = document.map { "; the whole saved file is \($0.path) (read_file)" } ?? "; scroll and read again for more"
+            notes.append("This view holds only what is on screen (its scroll bar shows about \(Int(share * 100))% of the document)\(rest).")
+        } else if let document, ((try? document.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? .max) < 20_000_000,
+                  let saved = try? DocumentText.read(document), found.text.count < saved.text.count * 6 / 10 {
+            notes.append("The window shows less text (\(found.text.count) characters) than its saved file \(document.path) (\(saved.text.count) characters): it may load the rest as it scrolls. read_file the file for its whole saved text.")
+        }
+        return WindowText(text: found.text, method: "accessibility", window: record, document: document?.path, notes: notes)
     }
 
-    /// What takes input in front of `record`: an app-modal dialog (save and open panels,
-    /// alerts) or the innermost sheet attached to it. Nil when nothing covers it.
-    /// Reads a web page that was just opened: waits for the browser to finish loading it
-    /// (and for script-built pages to fill in) before taking the text.
-    public func readPage(_ record: WindowRecord, limit: Int = 60_000, timeout: TimeInterval = 10) throws -> (text: String, method: String, window: WindowRecord) {
-        let deadline = Date().addingTimeInterval(timeout)
-        var current = record
-        while true {
-            current = WindowCatalog.find(id: Int(record.id)) ?? current
-            let loading = AX.windowElement(for: current).flatMap(Computer.webArea).map { AX.bool($0, "AXLoaded") == false } ?? false
-            if !loading, let read = try? readText(current, limit: limit), read.text.count >= 300 || Date() >= deadline {
-                return read
+    /// A document body without accessible text: ask the app for it, else read the saved file.
+    private func readOpaque(_ record: WindowRecord, document: URL?) throws -> WindowText {
+        var refusal = ""
+        if let bundleId = record.bundleId, let answer = DocumentScripts.text(bundleId: bundleId, title: record.title) {
+            switch answer {
+            case .success(let text):
+                return WindowText(text: text, method: "app_script", window: record, document: document?.path, notes: [])
+            case .failure(let error):
+                refusal = " (asking it failed: \(error.description))"
             }
-            if Date() >= deadline || Interrupts.isStopped {
-                return try readText(current, limit: limit)
-            }
-            Thread.sleep(forTimeInterval: loading ? 0.3 : 0.8)
         }
+        if let document, let saved = try? DocumentText.read(document) {
+            let note = "\(record.app) keeps this document's text from accessibility\(refusal), so this is its saved file; edits not saved yet are not in it."
+            return WindowText(text: saved.text, method: "saved_file", window: record, document: document.path, notes: [note])
+        }
+        throw HelperError("\(record.app) keeps this document's text from accessibility\(refusal), and there is no saved file to read. Read what is on screen from screenshots, scrolling for more.")
     }
 
+    /// The window's web content, if it shows a page.
     private static func webArea(in window: AXUIElement) -> AXUIElement? {
         var queue = [window]
         var visited = 0
@@ -234,6 +253,8 @@ public final class Computer: @unchecked Sendable {
         return nil
     }
 
+    /// What takes input in front of `record`: an app-modal dialog (save and open panels,
+    /// alerts) or the innermost sheet attached to it. Nil when nothing covers it.
     func frontSurface(of record: WindowRecord) -> WindowRecord? {
         let windows = WindowCatalog.windows(forPid: record.pid).filter { $0.onScreen }
         if record.layer != WindowCatalog.modalLevel, var modal = windows.first(where: { $0.layer == WindowCatalog.modalLevel }) {
@@ -542,7 +563,8 @@ public final class Computer: @unchecked Sendable {
                 focusedText = describe(focused, in: snapshot)
             }
             if let text = AX.string(focused, kAXSelectedTextAttribute), !text.isEmpty {
-                selected = truncateText(text, limit: 2000)
+                // All of it: the agent shows a long selection in part and saves the rest.
+                selected = String(text.prefix(1_000_000))
             }
         }
         var notes: [String] = []
@@ -1477,17 +1499,8 @@ public final class Computer: @unchecked Sendable {
                 return ["ok": true, "delivery": "ax_insert", "outcome": "worked"]
             }
         }
-        // Paste through the app's Edit menu: no key events, so the active input method and the
-        // user's own typing stay out of it, and long text lands at once. Only where the field's
-        // value shows whether it worked: an inactive app's Paste item can be stale and do nothing.
-        if policy != .foreground, !text.isEmpty, !isSecure, let focused,
-           let valueBefore = AX.string(focused, kAXValueAttribute),
-           BackgroundInput.paste(text, pid: record.pid),
-           let valueAfter = AX.string(focused, kAXValueAttribute), valueAfter != valueBefore {
-            journal(focused, previous: valueBefore)
-            showCursor(AX.center(focused), record: record, click: false)
-            return ["ok": true, "delivery": "background_paste", "outcome": "worked"]
-        }
+        // Not through the clipboard (pasting): it is the user's. Key events go to the app's
+        // process instead.
         if policy == .foreground {
             try ForegroundSession(record: record).activate()
         }

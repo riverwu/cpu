@@ -16,6 +16,7 @@ usage:
   cpuctl speech-bench <audio>…       feed audio in real time to every speech engine, compare
   cpuctl code <language> '<code>' [--timeout N] [--files '<json>'] [--yes]   run code as the code tool does
   cpuctl read <window-id|url>         print the full text of a window, or of a web page opened in the background
+  cpuctl read-file <path>             print the text of a file (text, rtf/doc/docx/odt/html, PDF)
   cpuctl say "<text>"                speak with the reply voice, report time to first audio
   cpuctl demo-test <name>            record a scripted Calculator demonstration (real clicks) and learn it as a skill
   cpuctl config                      print the effective configuration (no secrets)
@@ -197,25 +198,40 @@ case "read":
         let started = Date()
         let output: String = await onEngine {
             do {
-                let read: (text: String, method: String, window: WindowRecord)
+                let window: WindowRecord
                 if let id = Int(source) {
-                    guard let window = computer.window(id: id) else {
+                    guard let found = computer.window(id: id) else {
                         return "no window \(id)"
                     }
-                    read = try computer.readText(window)
+                    window = found
                 } else {
-                    guard let window = try computer.open(url: source, activate: false) else {
+                    guard let opened = try computer.open(url: source, activate: false) else {
                         return "no window shows \(source)"
                     }
-                    read = try computer.readPage(window)
+                    window = opened
                 }
-                return "\(read.method) · \(read.text.count) chars · \(Int(Date().timeIntervalSince(started) * 1000))ms\n\(read.text)"
+                let read = try computer.readText(window)
+                let notes = read.notes.map { "note: \($0)\n" }.joined()
+                return "\(read.method) · \(read.text.count) chars · \(Int(Date().timeIntervalSince(started) * 1000))ms\(read.document.map { " · file \($0)" } ?? "")\n\(notes)\(read.text)"
             } catch {
                 return "error: \(error)"
             }
         }
         print(output)
         return 0
+    }
+case "read-file":
+    guard arguments.count == 2 else {
+        print(usage)
+        exit(2)
+    }
+    let started = Date()
+    do {
+        let file = try DocumentText.read(URL(fileURLWithPath: (arguments[1] as NSString).expandingTildeInPath))
+        print("\(file.kind) · \(file.text.count) chars · \(Int(Date().timeIntervalSince(started) * 1000))ms\n\(file.text)")
+    } catch {
+        print("error: \(error)")
+        exit(1)
     }
 case "steps":
     guard arguments.count == 3, let id = Int(arguments[1]),

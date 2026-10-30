@@ -83,8 +83,14 @@ public final class Agent {
     private let apiKey: Task<String?, Never>
     /// What this Mac offers code (interpreters, tools, voices), found once at startup.
     private let codeEnvironment = Task.detached(priority: .utility) { CodeRunner.environmentFacts() }
-    /// The task's code workspace, made on its first `code` call.
+    /// The task's workspace (code, saved texts), made when first needed.
     private var runner: CodeRunner?
+    /// The user allowed copying to the clipboard in this session.
+    private var clipboardAllowed = false
+    /// A long selection already saved for the model: its text and where.
+    private var savedSelection: (text: String, path: String)?
+    /// Text taken out of rich files (PDF, Word…), saved for code: file and date → path.
+    private var extractedTexts: [String: String] = [:]
     /// Code results carrying image previews: (message, tool_result block). The model needs a
     /// preview for one step only; then it is dropped like an old screenshot.
     private var previewRefs: [(message: Int, block: Int)] = []
@@ -239,6 +245,9 @@ public final class Agent {
         editCheck = nil
         runner?.stopAll()
         runner = nil
+        clipboardAllowed = false
+        savedSelection = nil
+        extractedTexts = [:]
         previewRefs = []
         engineQueue.async { [computer] in
             computer.forgetUndo()
@@ -266,7 +275,7 @@ public final class Agent {
             return "- \(url.path) (\(kind))"
         }
         attachments = []
-        return Agent.text("The user attached these files to the request (dragged onto the card); \"this file\" means them. Open one with the open tool and its path, or enter a path in a file dialog with ⌘⇧G:\n" + lines.joined(separator: "\n"))
+        return Agent.text("The user attached these files to the request (dragged onto the card); \"this file\" means them. Take a file's text with read_file; show or edit it in its app with open; enter a path in a file dialog with ⌘⇧G:\n" + lines.joined(separator: "\n"))
     }
 
     /// Something the user said while the task runs; the model reads it at its next step.
@@ -735,7 +744,7 @@ public final class Agent {
     private func noteForReplay(_ use: JSONObject, output: ToolOutput) {
         let name = use["name"] as? String ?? ""
         switch name {
-        case "ask_user", "confirm", "hand_over", "read", "propose_edits", "code":
+        case "ask_user", "confirm", "hand_over", "read_window", "read_file", "propose_edits", "code":
             // The answer may differ next time; a replay must not assume it.
             recordable = false
         case "act", "open":
@@ -921,7 +930,7 @@ public final class Agent {
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd EEE HH:mm"
-        var context = "Time: \(formatter.string(from: Date()))\n\(Computer.homeFolders)\nFor code: \(await codeEnvironment.value)\nCPU's own commands for code (cpu help has details): `cpu tts <text|file> -o a.m4a` speaks a text into an audio file; `cpu page <url> --png a.png` (or --pdf a.pdf) saves a web page as one long image (or PDF), with --main just the article (title and body); `cpu page <url> --text` prints its text, --js <expr> evaluates JavaScript there; `cpu media <file>` gives length, tracks, pixels or pages; `cpu pdf <file> --text` a PDF's text.\nOn-screen windows, front to back:\n"
+        var context = "Time: \(formatter.string(from: Date()))\n\(Computer.homeFolders)\nFor code: \(await codeEnvironment.value)\nCPU's own commands for code (cpu help has details): `cpu tts <text|file> -o a.m4a` speaks a text into an audio file; `cpu page <url> --png a.png` (or --pdf a.pdf) saves a web page as one long image (or PDF), with --main just the article (title and body); `cpu page <url> --text` prints its text, --js <expr> evaluates JavaScript there (cpu page loads the page anew in a hidden browser, without the user's logins, in 5–20 s: for pages that are not open, or to save a page as an image or PDF; save its output to a file once); `cpu media <file>` gives length, tracks, pixels or pages; `cpu pdf <file> --text` a PDF's text.\nOn-screen windows, front to back:\n"
         // Without the user's context, window titles (mail subjects, document names) stay private.
         context += windows.prefix(15).map { shareContext ? Agent.windowLine($0) : "window \($0.id) · \($0.app)" }.joined(separator: "\n")
         var content: [JSONObject] = [["type": "text", "text": context]]
@@ -1092,40 +1101,10 @@ public final class Agent {
                 case .cancelled, nil:
                     return ToolOutput(content: [Agent.text("The user did not approve. Do not do it; finish by saying it was not done.")])
                 }
-            case "read":
-                let read: (text: String, method: String, window: WindowRecord)
-                var timing: [(String, Int)] = []
-                let started = Date()
-                if let url = stringValue(input["url"]) {
-                    // Open the page in the background and read it in one step.
-                    let opening = "打开 \(URL(string: url)?.host ?? url)"
-                    onEvent(.step(opening))
-                    recentSteps.append(opening)
-                    guard let window = try await engine({ try $0.open(url: url, activate: false) }) else {
-                        throw HelperError("Opened \(url), but no window shows it.")
-                    }
-                    try checkAllowed(window)
-                    timing.append(("open", Agent.ms(since: started)))
-                    let reading = Date()
-                    read = try await engine { try $0.readPage(window) }
-                    timing.append(("read", Agent.ms(since: reading)))
-                    current = read.window
-                } else {
-                    let record = try await targetWindow(input["window_id"])
-                    try checkAllowed(record)
-                    read = try await engine { try $0.readText(record) }
-                    timing.append(("read", Agent.ms(since: started)))
-                }
-                let words = "读取全文（约 \(read.text.count) 字）"
-                onEvent(.step(words))
-                recentSteps.append(words)
-                var header = "Full text of window \(read.window.id) (\(read.window.app)\(read.window.title.isEmpty ? "" : ", \"\(read.window.title)\"")), \(read.text.count) characters"
-                if read.method == "select_all_copy" {
-                    header += ", taken by Select All and Copy (the selection is collapsed and the clipboard restored)"
-                }
-                var output = ToolOutput(content: [Agent.text(header + ":\n" + read.text)])
-                output.timing = timing
-                return output
+            case "read_window":
+                return try await readWindow(input)
+            case "read_file":
+                return try await readFile(input)
             case "code":
                 return try await runCode(input)
             case "propose_edits":
@@ -1192,10 +1171,115 @@ public final class Agent {
         }
     }
 
-    /// Runs the model's code in the task's workspace, after the user's OK when it is risky.
-    private func runCode(_ input: JSONObject) async throws -> ToolOutput {
+    /// The task's workspace: where code runs and long texts are saved.
+    private func workspace() -> CodeRunner {
         let runner = self.runner ?? CodeRunner(task: log?.stem ?? UUID().uuidString)
         self.runner = runner
+        return runner
+    }
+
+    /// Every text result shows this much at most; the rest is read on from its file.
+    static let textBudget = 60_000
+
+    /// What a window shows, in full; saved in the workspace for read_file and code.
+    private func readWindow(_ input: JSONObject) async throws -> ToolOutput {
+        let started = Date()
+        let record = try await targetWindow(input["window_id"])
+        try checkAllowed(record)
+        let read = try await engine { try $0.readText(record) }
+        current = read.window
+        let words = "读取全文（约 \(read.text.count) 字）"
+        onEvent(.step(words))
+        recentSteps.append(words)
+        let window = read.window
+        let saved = LongText.save(read.text, name: window.title.isEmpty ? window.app : window.title, in: workspace().workspace)
+        var header = "Text of window \(window.id) (\(window.app)\(window.title.isEmpty ? "" : ", \"\(window.title)\"")): \(LongText.lines(of: read.text).count) lines, \(read.text.count) characters"
+        switch read.method {
+        case "app_script":
+            header += ", given by \(window.app) itself (its document body keeps the text from accessibility)"
+        case "saved_file":
+            header += ", from its saved file"
+        default:
+            break
+        }
+        if let document = read.document {
+            header += ". The window shows the file \(document)"
+        }
+        if let saved {
+            header += ". Saved as \(saved) in the workspace (for read_file and code)"
+        }
+        var text = header + "."
+        for note in read.notes {
+            text += "\nNote: " + note
+        }
+        text += "\n\n" + LongText.excerpt(read.text, budget: Agent.textBudget, file: saved)
+        var output = ToolOutput(content: [Agent.text(text)])
+        output.timing = [("read", Agent.ms(since: started))]
+        return output
+    }
+
+    /// A file's text, any kind, from a given line: also how long results are read on.
+    private func readFile(_ input: JSONObject) async throws -> ToolOutput {
+        guard let path = stringValue(input["path"])?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else {
+            throw HelperError("read_file needs a path")
+        }
+        let started = Date()
+        let workspace = workspace().workspace
+        let url: URL
+        if path.hasPrefix("/") {
+            url = URL(fileURLWithPath: path)
+        } else if path.hasPrefix("~") {
+            url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        } else {
+            url = workspace.appendingPathComponent(path)
+        }
+        if let secret = Agent.secretPlace(url) {
+            throw HelperError("\(secret) holds credentials; CPU does not send them to the model.")
+        }
+        let document = try await Agent.offEngine { try DocumentText.read(url) }
+        let from = intValue(input["from_line"]) ?? 1
+        if from <= 1 {
+            let words = "读取文件 \(url.lastPathComponent)"
+            onEvent(.step(words))
+            recentSteps.append(words)
+        }
+        let lines = LongText.lines(of: document.text).count
+        var header = "Text of \(url.path) (\(document.kind)): \(lines) lines, \(document.text.count) characters"
+        // Text taken out of a PDF or Word file is saved too, so that code can search it.
+        let plain = document.kind.hasSuffix(" text") || document.kind == "text"
+        if !plain {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0
+            let key = "\(url.path)#\(modified)"
+            if extractedTexts[key] == nil {
+                extractedTexts[key] = LongText.save(document.text, name: url.deletingPathExtension().lastPathComponent, in: workspace)
+            }
+            if let saved = extractedTexts[key] {
+                header += ". Its text is saved as \(saved) in the workspace (for code)"
+            }
+        }
+        let body = LongText.excerpt(document.text, from: from, count: intValue(input["lines"]), budget: Agent.textBudget, file: path)
+        var output = ToolOutput(content: [Agent.text(header + ".\n\n" + body)])
+        output.timing = [("read", Agent.ms(since: started))]
+        return output
+    }
+
+    /// Places that keep passwords and keys: their files stay on the Mac.
+    static func secretPlace(_ url: URL) -> String? {
+        let path = url.standardizedFileURL.path
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        for folder in [".ssh", ".gnupg", ".aws", "Library/Keychains", ".config/gh", ".docker"] where path.hasPrefix("\(home)/\(folder)/") || path == "\(home)/\(folder)" {
+            return "~/\(folder)"
+        }
+        let name = url.lastPathComponent
+        if [".netrc", ".npmrc", ".pypirc", ".git-credentials"].contains(name) || name == ".env" || name.hasPrefix(".env.") || url.pathExtension == "keychain-db" {
+            return name
+        }
+        return nil
+    }
+
+    /// Runs the model's code in the task's workspace, after the user's OK when it is risky.
+    private func runCode(_ input: JSONObject) async throws -> ToolOutput {
+        let runner = workspace()
         let timeout = max(1, min(600, doubleValue(input["timeout"]) ?? 60))
         let started = Date()
         if let job = intValue(input["job"]) {
@@ -1321,6 +1405,21 @@ public final class Agent {
         try checkAllowed(first)
         guard let actions = input["actions"] as? [JSONObject], !actions.isEmpty else {
             throw HelperError("actions must be a non-empty array")
+        }
+        // The clipboard is the user's: copying over what they copied needs their say.
+        if !clipboardAllowed, let copying = Agent.clipboardWrite(in: actions) {
+            let reply = await askUser(.confirm(action: "使用剪贴板", details: "这一步要\(copying)，会替换你剪贴板里现在的内容。"))
+            if Interrupts.isStopped {
+                throw Stopped()
+            }
+            switch reply {
+            case .confirmed, .done, .accepted:
+                clipboardAllowed = true
+            case .text(let answer):
+                return ToolOutput(content: [Agent.text("Nothing was done. Instead of allowing the clipboard, the user said: \(answer)")], isError: true)
+            case .cancelled, nil:
+                return ToolOutput(content: [Agent.text("Nothing was done: the user keeps their clipboard as it is. Move text by reading it (read_window, read_file) and typing it (type), not by copying.")], isError: true)
+            }
         }
         var record = first
         var stateId = stringValue(input["state_id"]) ?? latest[record.id]?.stateId
@@ -1682,6 +1781,46 @@ public final class Agent {
     }
 
     /// Translates one model action into engine calls (a `type` with an element clicks it first).
+    /// What in these actions would copy or cut to the clipboard, in words for the user; nil
+    /// when nothing does.
+    static func clipboardWrite(in actions: [JSONObject]) -> String? {
+        for action in actions {
+            switch stringValue(action["do"]) ?? "" {
+            case "key":
+                let keys = (stringValue(action["key"]) ?? "").lowercased().replacingOccurrences(of: "⌘", with: "cmd+")
+                    .replacingOccurrences(of: " ", with: "").split(separator: "+").map(String.init)
+                guard keys.count == 2, keys.contains("cmd") || keys.contains("command") else {
+                    continue
+                }
+                if keys.contains("c") {
+                    return "按 ⌘C 拷贝"
+                }
+                if keys.contains("x") {
+                    return "按 ⌘X 剪切"
+                }
+            case "menu":
+                let path = MenuBar.parts(stringValue(action["path"]) ?? "")
+                // 文件 ▸ 复制 is Duplicate in Chinese menus, not Copy.
+                if let item = path.last, path.count > 1, isCopyLabel(item), !(path.first ?? "").hasPrefix("文件"), path.first?.lowercased() != "file" {
+                    return "选择菜单「\(item)」"
+                }
+            case "click", "double_click", "secondary":
+                if let target = stringValue(action["target"]), isCopyLabel(target) {
+                    return "点「\(target)」"
+                }
+            default:
+                break
+            }
+        }
+        return nil
+    }
+
+    /// Copy and cut commands and buttons: 拷贝, 复制链接, Copy Link, Cut…
+    static func isCopyLabel(_ label: String) -> Bool {
+        let text = MenuBar.normalize(label).lowercased().trimmingCharacters(in: .whitespaces)
+        return ["拷贝", "复制", "剪切"].contains { text.hasPrefix($0) } || text.range(of: #"^(copy|cut)\b"#, options: .regularExpression) != nil
+    }
+
     private func makeSteps(_ action: JSONObject, record: WindowRecord, stateId: String?) throws -> [(method: String, params: [String: Any], label: String)] {
         let kind = stringValue(action["do"]) ?? ""
         // Window 0 stands for an app without windows, reached through its menus.
@@ -1870,6 +2009,19 @@ public final class Agent {
 
     /// First block: header (kept forever). Then the outline and an optional screenshot,
     /// which are elided once newer observations exist.
+    /// The selection as the model sees it: a long one in part, the whole of it saved.
+    private func selectionLine(_ selected: String) -> String {
+        let shown = 2_000
+        guard selected.count > shown else {
+            return "Selected text: \(selected)"
+        }
+        if savedSelection?.text != selected, let path = LongText.save(selected, name: "selection", in: workspace().workspace) {
+            savedSelection = (selected, path)
+        }
+        let whole = savedSelection.map { "all of it is saved as \($0.path): read_file it or search it with code" } ?? "the rest could not be saved"
+        return "Selected text (the first \(shown) of \(selected.count) characters; \(whole)): \(selected.prefix(shown))…"
+    }
+
     private func observationBlocks(_ observation: Observation, header: String) async -> [JSONObject] {
         var header = header
         if let briefing = await briefing(for: observation.window) {
@@ -1890,7 +2042,7 @@ public final class Agent {
             lines.append("Focused: \(focused)")
         }
         if let selected = observation.selectedText {
-            lines.append("Selected text: \(selected)")
+            lines.append(selectionLine(selected))
         }
         if let note = observation.note {
             lines.append("Note: \(note)")

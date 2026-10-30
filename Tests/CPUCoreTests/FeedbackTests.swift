@@ -142,6 +142,7 @@ struct MenuPathTests {
     @Test func toolSchemasParse() {
         let names = Prompt.tools.compactMap { $0["name"] as? String }
         #expect(names.contains("act"))
-        #expect(names.contains("read"))
+        #expect(names.contains("read_window") && names.contains("read_file"))
+        #expect(!names.contains("read"))
     }
 }

@@ -66,9 +66,14 @@ enum Prompt {
     directory); write what the user gets to 桌面 or 下载 with full paths. In code, never \
     activate apps or simulate keys and clicks.
     - To take in a whole document or page (summarize, analyze, check, translate, edit), call \
-    `read` once instead of scrolling through it screen by screen. `read` with `url` opens a web \
-    page and reads it in one step; to research several pages, call it once per URL in the \
-    same turn.
+    `read_window` once instead of scrolling through it screen by screen: it gives what the \
+    user's window shows, already rendered and with their logins. For web pages, `open` each \
+    URL (several in one turn), then `read_window` each. `read_file` gives a file's text \
+    (documents, PDFs, code). Long text comes in parts: the result says which lines it shows \
+    and where the whole text is saved; read on with `read_file` from the next line, or search \
+    the file with `code`.
+    - The clipboard is the user's: move text between apps by reading it and typing it, not \
+    by copying and pasting. Copying asks the user first.
     - Write long content (an article, a script, a message) straight into the action that \
     uses it; do not draft it in your thinking first, which doubles the time.
     - Before changing the user's own writing, show the changes with `propose_edits` unless \
@@ -217,14 +222,26 @@ enum Prompt {
             }
           },
           {
-            "name": "read",
-            "description": "Read the full text of a window's document or page, including what is scrolled out of view, as a screen reader does. Apps that keep their text from accessibility (e.g. Word) are read by Select All and Copy; CPU then collapses the selection and restores the clipboard. With url, opens that web page in the background and reads it once it has loaded.",
+            "name": "read_window",
+            "description": "The full text of what a window shows (a web page, a document, a mail, a note, a chat), including what is scrolled out of view, as a screen reader reads it, in any app; waits for a page that is still loading. The text is also saved in the workspace for read_file and code. The result notes when a view holds only what is on screen.",
             "input_schema": {
               "type": "object",
               "properties": {
-                "window_id": {"type": "integer", "description": "Default: the current window."},
-                "url": {"type": "string", "description": "A web page to open and read in one step."}
+                "window_id": {"type": "integer", "description": "Default: the current window."}
               }
+            }
+          },
+          {
+            "name": "read_file",
+            "description": "The text of a file: plain text and code, rtf/doc/docx/odt/html, PDF (page by page), and the texts CPU saved from long results. Shows whole lines from from_line; when more follows, it says where to go on.",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "path": {"type": "string", "description": "Absolute, ~/…, or relative to the workspace (texts/…)."},
+                "from_line": {"type": "integer", "description": "First line to show (default 1)."},
+                "lines": {"type": "integer", "description": "At most this many lines (default: as many as fit)."}
+              },
+              "required": ["path"]
             }
           },
           {

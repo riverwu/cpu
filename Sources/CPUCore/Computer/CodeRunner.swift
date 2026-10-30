@@ -386,7 +386,7 @@ public final class CodeRunner: @unchecked Sendable {
         if !present.isEmpty {
             parts.append(present.joined(separator: ", "))
         }
-        var builtIn = "built in: say, afconvert, sips, textutil, mdls, qlmanage, pbcopy/pbpaste, curl, trash"
+        var builtIn = "built in: say, afconvert, sips, textutil, mdls, qlmanage, pbpaste, curl, trash"
         // "Tingting (中文（中国大陆）) zh_CN    # 你好！我叫婷婷。": the -v name is before the locale.
         var voices: [String] = []
         for line in capture(["/usr/bin/say", "-v", "?"]).split(separator: "\n") where line.contains(" zh_CN ") {
@@ -593,12 +593,12 @@ private final class Job: @unchecked Sendable {
         }
         let scripted = request.language == .applescript || request.language == .jxa
         if !out.isEmpty {
-            lines.append((scripted && exitCode == 0 ? "Result:" : "Output:") + "\n" + Job.excerpt(out, limit: 8000, file: output))
+            lines.append((scripted && exitCode == 0 ? "Result:" : "Output:") + "\n" + Job.excerpt(out, limit: 8000, file: shown(output)))
         } else if exitCode == 0 {
             lines.append("It printed nothing.")
         }
         if !err.isEmpty {
-            lines.append("Errors:\n" + Job.excerpt(err, limit: 4000, file: errors))
+            lines.append("Errors:\n" + Job.excerpt(err, limit: 4000, file: shown(errors)))
         }
         lines += explain(errors: err, exitCode: exitCode)
         lines += fileChanges()
@@ -769,15 +769,24 @@ private final class Job: @unchecked Sendable {
         return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// The whole text when short; else its start and end, and where the rest is.
-    static func excerpt(_ text: String, limit: Int, file: URL? = nil) -> String {
+    /// The whole text when short; else its start and end (where errors and results show),
+    /// and how to read the rest, as every long text result says it.
+    static func excerpt(_ text: String, limit: Int, file: String? = nil) -> String {
         guard text.count > limit else {
             return text
         }
         let half = limit / 2
         let omitted = text.count - 2 * half
-        let whereFull = file.map { " (all of it: \($0.path))" } ?? ""
-        return String(text.prefix(half)) + "\n… \(omitted) characters omitted\(whereFull) …\n" + String(text.suffix(half))
+        let rest = file.map { "; the whole of it is \($0): read_file it from a line, or search it with code (grep -n)" } ?? ""
+        return String(text.prefix(half)) + "\n[… \(omitted) of \(text.count) characters left out here\(rest) …]\n" + String(text.suffix(half))
+    }
+
+    /// A file of this run as the model names it: relative to the workspace.
+    private func shown(_ file: URL) -> String {
+        guard let workspace = runner?.workspace.standardizedFileURL.path, file.standardizedFileURL.path.hasPrefix(workspace + "/") else {
+            return file.path
+        }
+        return String(file.standardizedFileURL.path.dropFirst(workspace.count + 1))
     }
 }
 

@@ -196,7 +196,9 @@ enum EventPoster {
             }
             switch character {
             case "\n", "\r\n", "\r":
-                try postKey(KeyChord(keyCode: 36, flags: [], display: "return", key: "return"), pid: pid, hid: hid)
+                // A line break inside the text, not "send": plain Return sends in chat apps.
+                // Submitting is the model's own key press.
+                try postKey(KeyChord(keyCode: 36, flags: .maskShift, display: "shift+return", key: "return"), pid: pid, hid: hid)
             case "\t":
                 try postKey(KeyChord(keyCode: 48, flags: [], display: "tab", key: "tab"), pid: pid, hid: hid)
             default:
