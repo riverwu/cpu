@@ -76,6 +76,30 @@ struct TaskStoreTests {
         #expect(!sessions.contains { $0.title == "任务 0" || $0.title == "任务 1" })
     }
 
+    @Test func resourcesKeepOneEntryWithTheirWeightiestUse() {
+        var list: [SessionResource] = []
+        let page = "https://news.ycombinator.com/"
+        SessionResource.merge(SessionResource(kind: .page, use: .opened, title: "news.ycombinator.com", location: page), into: &list)
+        SessionResource.merge(SessionResource(kind: .page, use: .read, title: "Hacker News", location: page), into: &list)
+        SessionResource.merge(SessionResource(kind: .page, use: .opened, title: "", location: page), into: &list)
+        SessionResource.merge(SessionResource(kind: .file, use: .created, title: "hn.md", location: "/Users/x/Desktop/hn.md"), into: &list)
+        #expect(list == [
+            SessionResource(kind: .page, use: .read, title: "Hacker News", location: page),
+            SessionResource(kind: .file, use: .created, title: "hn.md", location: "/Users/x/Desktop/hn.md")
+        ])
+    }
+
+    @Test func sessionsSavedBeforeResourcesStillLoad() throws {
+        let old = #"{"request":"整理新闻","steps":[],"reply":"好了","failed":false,"timing":"3.0 秒"}"#
+        let turn = try JSONDecoder().decode(SessionTurn.self, from: Data(old.utf8))
+        #expect(turn.request == "整理新闻" && turn.resources.isEmpty)
+    }
+
+    @Test func pageTitlesDropTheBrowserName() {
+        let window = WindowRecord(app: "Google Chrome", bundleId: nil, id: 1, pid: 1, title: "Hacker News - Google Chrome", bounds: .zero, onScreen: true)
+        #expect(Agent.pageTitle(window) == "Hacker News")
+    }
+
     @Test func onlyContextFreeRequestsAreReplayed() {
         #expect(Agent.isReplayable("用计算器算 37 乘以 3"))
         #expect(Agent.isReplayable("给王宁发微信说收到"))

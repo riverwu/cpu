@@ -32,6 +32,64 @@ public struct SessionStep: Codable, Equatable {
     }
 }
 
+/// A page or file a turn worked with, and what it did with it: what makes a history entry
+/// findable and checkable later ("这篇文章说了啥" needs the article's address).
+public struct SessionResource: Codable, Equatable {
+    public enum Kind: String, Codable {
+        case page, file
+    }
+
+    public enum Use: String, Codable {
+        /// The window the user was looking at when they asked.
+        case context
+        case opened, read, created, changed
+
+        /// Which use to keep when one resource has several.
+        var weight: Int {
+            switch self {
+            case .opened:
+                return 1
+            case .read:
+                return 2
+            case .context:
+                return 3
+            case .changed:
+                return 4
+            case .created:
+                return 5
+            }
+        }
+    }
+
+    public var kind: Kind
+    public var use: Use
+    public var title: String
+    /// The URL of a page, the path of a file.
+    public var location: String
+
+    public init(kind: Kind, use: Use, title: String, location: String) {
+        self.kind = kind
+        self.use = use
+        self.title = title
+        self.location = location
+    }
+
+    /// Adds `resource` to `list`: once per location, keeping its weightiest use.
+    public static func merge(_ resource: SessionResource, into list: inout [SessionResource]) {
+        if let index = list.firstIndex(where: { $0.kind == resource.kind && $0.location == resource.location }) {
+            if resource.use.weight > list[index].use.weight {
+                list[index].use = resource.use
+            }
+            // A page's title arrives as it loads: the latest one is the page's.
+            if !resource.title.isEmpty {
+                list[index].title = resource.title
+            }
+        } else {
+            list.append(resource)
+        }
+    }
+}
+
 /// One exchange on the card: what the user asked, what CPU did, and its answer.
 public struct SessionTurn: Codable, Equatable {
     public var request: String
@@ -40,13 +98,27 @@ public struct SessionTurn: Codable, Equatable {
     public var failed: Bool
     /// How long it took ("35.2 秒"); empty for tasks from before sessions were kept.
     public var timing: String
+    /// The pages and files it worked with.
+    public var resources: [SessionResource]
 
-    public init(request: String, steps: [SessionStep] = [], reply: String = "", failed: Bool = false, timing: String = "") {
+    public init(request: String, steps: [SessionStep] = [], reply: String = "", failed: Bool = false, timing: String = "", resources: [SessionResource] = []) {
         self.request = request
         self.steps = steps
         self.reply = reply
         self.failed = failed
         self.timing = timing
+        self.resources = resources
+    }
+
+    // Sessions saved before resources were kept have none.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        request = try values.decode(String.self, forKey: .request)
+        steps = try values.decode([SessionStep].self, forKey: .steps)
+        reply = try values.decode(String.self, forKey: .reply)
+        failed = try values.decode(Bool.self, forKey: .failed)
+        timing = try values.decode(String.self, forKey: .timing)
+        resources = try values.decodeIfPresent([SessionResource].self, forKey: .resources) ?? []
     }
 }
 

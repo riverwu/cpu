@@ -228,16 +228,16 @@ enum RecentFiles {
         return folders
     }
 
-    /// Files modified since `start`, described. Apps write a saved file after the dialog
-    /// closes, so after a save this waits up to `timeout` for it.
-    static func written(since start: Date, document: String?, timeout: TimeInterval = 0) -> [String] {
+    /// Files modified since `start`, with their description. Apps write a saved file after
+    /// the dialog closes, so after a save this waits up to `timeout` for it.
+    static func written(since start: Date, document: String?, timeout: TimeInterval = 0) -> [(url: URL, description: String)] {
         let folders = folders(document: document)
         var found: [(url: URL, size: Int)] = []
         _ = waitUntil(timeout: timeout, interval: 0.15) {
             found = scan(folders, since: start.addingTimeInterval(-1))
             return !found.isEmpty || Interrupts.isStopped
         }
-        return found.prefix(3).map { describe($0.url, size: $0.size) }
+        return found.prefix(3).map { ($0.url, describe($0.url, size: $0.size)) }
     }
 
     static func scan(_ folders: [URL], since: Date) -> [(url: URL, size: Int)] {

@@ -23,6 +23,8 @@ public struct Observation {
     public let sparse: Bool
     /// The file the window shows (a document's path), when the app reports it.
     public var document: String? = nil
+    /// The web address the window shows (a browser's current page).
+    public var page: String? = nil
     /// Where the observation's time went, in ms: "ax" (outline), "screenshot", "ocr".
     public var timing: [String: Int] = [:]
 }
@@ -174,6 +176,8 @@ public final class Computer: @unchecked Sendable {
         public let window: WindowRecord
         /// The file the window shows, when it has one.
         public let document: String?
+        /// The web address it shows, for a browser.
+        public var page: String?
         /// How complete the text is, when that is in doubt.
         public let notes: [String]
     }
@@ -202,7 +206,9 @@ public final class Computer: @unchecked Sendable {
         if waited, let fresh = WindowCatalog.find(id: Int(record.id)) {
             record.title = fresh.title
         }
-        let document = AX.string(window, "AXDocument").flatMap { URL(string: $0) }.flatMap { $0.isFileURL ? $0 : nil }
+        let address = AX.string(window, "AXDocument").flatMap { URL(string: $0) }
+        let document = address.flatMap { $0.isFileURL ? $0 : nil }
+        let page = address.flatMap { Computer.isWebAddress($0) ? $0.absoluteString : nil }
         if found.opaqueDocument {
             return try readOpaque(record, document: document)
         }
@@ -217,7 +223,11 @@ public final class Computer: @unchecked Sendable {
                   let saved = try? DocumentText.read(document), found.text.count < saved.text.count * 6 / 10 {
             notes.append("The window shows less text (\(found.text.count) characters) than its saved file \(document.path) (\(saved.text.count) characters): it may load the rest as it scrolls. read_file the file for its whole saved text.")
         }
-        return WindowText(text: found.text, method: "accessibility", window: record, document: document?.path, notes: notes)
+        return WindowText(text: found.text, method: "accessibility", window: record, document: document?.path, page: page, notes: notes)
+    }
+
+    static func isWebAddress(_ url: URL) -> Bool {
+        ["http", "https"].contains(url.scheme?.lowercased() ?? "")
     }
 
     /// A document body without accessible text: ask the app for it, else read the saved file.
@@ -226,14 +236,14 @@ public final class Computer: @unchecked Sendable {
         if let bundleId = record.bundleId, let answer = DocumentScripts.text(bundleId: bundleId, title: record.title) {
             switch answer {
             case .success(let text):
-                return WindowText(text: text, method: "app_script", window: record, document: document?.path, notes: [])
+                return WindowText(text: text, method: "app_script", window: record, document: document?.path, page: nil, notes: [])
             case .failure(let error):
                 refusal = " (asking it failed: \(error.description))"
             }
         }
         if let document, let saved = try? DocumentText.read(document) {
             let note = "\(record.app) keeps this document's text from accessibility\(refusal), so this is its saved file; edits not saved yet are not in it."
-            return WindowText(text: saved.text, method: "saved_file", window: record, document: document.path, notes: [note])
+            return WindowText(text: saved.text, method: "saved_file", window: record, document: document.path, page: nil, notes: [note])
         }
         throw HelperError("\(record.app) keeps this document's text from accessibility\(refusal), and there is no saved file to read. Read what is on screen from screenshots, scrolling for more.")
     }
@@ -574,6 +584,8 @@ public final class Computer: @unchecked Sendable {
         if window == nil {
             notes.append("The app did not expose this window to accessibility; the outline covers the whole app.")
         }
+        // A document's file, or a browser's page.
+        let address = window.flatMap { AX.string($0, "AXDocument") }.flatMap { URL(string: $0) }
         return Observation(
             stateId: stateId,
             window: record,
@@ -588,7 +600,8 @@ public final class Computer: @unchecked Sendable {
             screenText: items.isEmpty ? nil : ScreenText.lines(items),
             textItems: items,
             sparse: sparse,
-            document: window.flatMap { AX.string($0, "AXDocument") }.flatMap { URL(string: $0) }.flatMap { $0.isFileURL ? $0.path : nil },
+            document: address.flatMap { $0.isFileURL ? $0.path : nil },
+            page: address.flatMap { Computer.isWebAddress($0) ? $0.absoluteString : nil },
             timing: timing
         )
     }
@@ -616,6 +629,8 @@ public final class Computer: @unchecked Sendable {
         public var settleMs = 0
         /// Time spent in `wait` actions.
         public var waitMs = 0
+        /// Files written while the actions ran (saved, exported, downloaded).
+        public var files: [String] = []
     }
 
     /// Runs `steps` (each a `handle` method + params) against one window, stopping at the first
@@ -709,8 +724,9 @@ public final class Computer: @unchecked Sendable {
         let saved = result.failed == nil && steps.contains(where: { Computer.saves($0.label) })
         let document = AX.windowElement(for: record).flatMap { AX.string($0, "AXDocument") }
         let earlier = result.lines
-        for file in RecentFiles.written(since: batchStarted, document: document, timeout: saved ? 2.5 : 0) where !earlier.contains(where: { $0.contains(file) }) {
-            result.lines.append("\(saved ? "Saved file" : "File written meanwhile"): \(file)")
+        for file in RecentFiles.written(since: batchStarted, document: document, timeout: saved ? 2.5 : 0) where !earlier.contains(where: { $0.contains(file.description) }) {
+            result.lines.append("\(saved ? "Saved file" : "File written meanwhile"): \(file.description)")
+            result.files.append(file.url.path)
         }
         result.window = followUpWindow(after: record, frontBefore: frontBefore, windowsBefore: windowsBefore)
         // Borrowed the foreground for real input: hand it back to the user's app, unless a

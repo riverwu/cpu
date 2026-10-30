@@ -937,6 +937,8 @@ final class AssistantController {
             }
         case .detail(let text):
             model.addDetail(text)
+        case .resource(let resource):
+            SessionResource.merge(resource, into: &model.resources)
         case .step(let text):
             model.addStep(text)
             if !model.status.hasPrefix("你：") {

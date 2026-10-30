@@ -74,13 +74,16 @@ public final class CodeRunner: @unchecked Sendable {
         public let report: String
         /// Images the code wrote, for a look at what they show.
         public let images: [URL]
+        /// Paths of the files it created and changed outside the workspace (what the user gets).
+        public var created: [String] = []
+        public var changed: [String] = []
     }
 
     /// Runs the code and waits for it to finish (or time out, or the user to stop).
     public func run(_ request: Request) throws -> Result {
         let job = try start(request)
         let report = job.finish(timeout: request.timeout)
-        return Result(report: report, images: job.images)
+        return Result(report: report, images: job.images, created: job.created, changed: job.changed)
     }
 
     /// Starts the code and returns at once; `wait(job:)` reports it when it is done.
@@ -445,6 +448,9 @@ private final class Job: @unchecked Sendable {
     private var frontBefore: pid_t?
     /// Images created or changed, newest first.
     private(set) var images: [URL] = []
+    /// Files created and changed outside the workspace, found when the run is described.
+    private(set) var created: [String] = []
+    private(set) var changed: [String] = []
 
     init(number: Int, request: CodeRunner.Request, runner: CodeRunner, output: URL, errors: URL, before: FileSnapshot, folders: [URL], backups: [(original: URL, backup: URL)]) {
         self.number = number
@@ -688,6 +694,8 @@ private final class Job: @unchecked Sendable {
         let change = before.changes(to: after)
         var lines: [String] = []
         let workspacePath = runner.workspace.path
+        created = change.created.filter { !$0.hasPrefix(workspacePath + "/") }
+        changed = change.modified.filter { !$0.hasPrefix(workspacePath + "/") }
         func shown(_ path: String) -> String {
             path.hasPrefix(workspacePath + "/") ? "workspace/" + path.dropFirst(workspacePath.count + 1) : path
         }

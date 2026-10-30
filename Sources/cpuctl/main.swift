@@ -308,6 +308,8 @@ case "run":
                     print("… \(text)")
                 case .step(let text):
                     print("▸ \(text)")
+                case .resource(let resource):
+                    print("◇ \(resource.use.rawValue) \(resource.kind.rawValue): \(resource.title) <\(resource.location)>")
                 case .metrics(let text):
                     print("\u{1B}[2m  \(text)\u{1B}[0m")
                 case .goal(let title):

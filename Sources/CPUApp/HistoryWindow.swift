@@ -103,7 +103,7 @@ final class HistoryModel: ObservableObject {
     }
 
     private static func text(of session: SessionRecord) -> String {
-        ([session.title] + session.turns.flatMap { [$0.request, $0.reply] }).joined(separator: "\n").lowercased()
+        ([session.title] + session.turns.flatMap { [$0.request, $0.reply] + $0.resources.flatMap { [$0.title, $0.location] } }).joined(separator: "\n").lowercased()
     }
 
     static func dayTitle(_ date: Date) -> String {

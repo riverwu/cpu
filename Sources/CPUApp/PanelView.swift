@@ -34,6 +34,8 @@ final class PanelModel: ObservableObject {
     @Published var reply = ""
     /// How long the current turn took.
     @Published var timing = ""
+    /// The pages and files the current turn worked with.
+    @Published var resources: [SessionResource] = []
     /// A note beside the result's buttons ("已存为快捷说法…").
     @Published var footer = ""
     /// Earlier turns whose steps are open.
@@ -88,7 +90,7 @@ final class PanelModel: ObservableObject {
 
     /// The current turn as the history keeps it.
     var currentTurn: SessionTurn {
-        SessionTurn(request: prompt, steps: steps, reply: reply, failed: phase == .failed, timing: timing)
+        SessionTurn(request: prompt, steps: steps, reply: reply, failed: phase == .failed, timing: timing, resources: resources)
     }
 
     func reset() {
@@ -102,6 +104,7 @@ final class PanelModel: ObservableObject {
         status = ""
         reply = ""
         timing = ""
+        resources = []
         footer = ""
         openTurns = []
         request = nil
@@ -120,6 +123,7 @@ final class PanelModel: ObservableObject {
         steps = []
         reply = ""
         timing = ""
+        resources = []
         footer = ""
         stepsExpanded = false
     }
@@ -582,11 +586,11 @@ struct PanelView: View {
         FitScroll(maxHeight: transcriptMaxHeight, target: scrollTarget) {
             VStack(alignment: .leading, spacing: 16) {
                 ForEach(Array(model.turns.enumerated()), id: \.offset) { index, turn in
-                    TurnView(turn: turn, showsPrompt: index > 0 || turn.request != model.title, expanded: openTurn(index))
+                    TurnView(turn: turn, showsPrompt: index > 0 || turn.request != model.title, expanded: openTurn(index), resourceLimit: 5)
                     Divider().opacity(0.6)
                 }
                 VStack(spacing: 0) {
-                    TurnView(turn: model.currentTurn, showsPrompt: showsCurrentPrompt, live: live, expanded: $model.stepsExpanded)
+                    TurnView(turn: model.currentTurn, showsPrompt: showsCurrentPrompt, live: live, expanded: $model.stepsExpanded, resourceLimit: 5)
                     Color.clear.frame(height: 1).id(PanelView.endID)
                 }
                 .id(PanelView.currentTurnID)

@@ -32,6 +32,7 @@ enum CardPreview {
         }
         model.reply = (try? String(contentsOfFile: arguments[flag + 1], encoding: .utf8)) ?? ""
         model.timing = "52.8 秒"
+        model.resources = sampleResources
         model.stepsExpanded = options.contains("expanded")
         model.docked = options.contains("docked") || options.contains("pill")
         if options.contains("edits") {
@@ -59,8 +60,18 @@ enum CardPreview {
         request: "帮我把 Hacker News 上今天的新闻整理一下，做成一个博客",
         steps: [SessionStep(text: "打开 news.ycombinator.com"), SessionStep(text: "读取首页 30 条"), SessionStep(text: "写入 hn.md")],
         reply: "已经整理好，保存在桌面的 `hn.md`，共 10 条，每条附一句点评。",
-        timing: "21.4 秒"
+        timing: "21.4 秒",
+        resources: [
+            SessionResource(kind: .page, use: .read, title: "Hacker News", location: "https://news.ycombinator.com/"),
+            SessionResource(kind: .file, use: .created, title: "hn.md", location: NSHomeDirectory() + "/Desktop/hn.md")
+        ]
     )
+
+    private static let sampleResources = [
+        SessionResource(kind: .page, use: .context, title: "Agents in Games · Labs", location: "https://labs.ycombinator.com/projects/games/index.html"),
+        SessionResource(kind: .file, use: .created, title: "hn-2026-10-30.md", location: NSHomeDirectory() + "/Desktop/hn-2026-10-30.md"),
+        SessionResource(kind: .page, use: .opened, title: "Show HN: A tiny database", location: "https://news.ycombinator.com/item?id=4521")
+    ]
 
     private static func renderHistory(reply: String, to path: String) {
         let model = HistoryModel()
@@ -69,6 +80,7 @@ enum CardPreview {
         second.request = "再把重点整理成表格，按热度排序"
         second.reply = (try? String(contentsOfFile: reply, encoding: .utf8)) ?? ""
         second.timing = "52.8 秒"
+        second.resources = sampleResources
         model.sessions = [
             SessionRecord(title: "整理今天 Hacker News 的热门新闻", started: now.addingTimeInterval(-600), turns: [sampleTurn, second]),
             SessionRecord(title: "把未读邮件标为已读", started: now.addingTimeInterval(-7200), turns: [SessionTurn(request: "把这个邮箱里的未读邮件标为已读", reply: "已把 12 封未读邮件标为已读。", timing: "8.1 秒")]),

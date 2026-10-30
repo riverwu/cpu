@@ -14,6 +14,8 @@ public enum AgentEvent {
     case step(String)
     /// More about the step just announced, shown when the steps are opened (the code it runs).
     case detail(String)
+    /// A page or file the turn worked with (again when its use or title changes).
+    case resource(SessionResource)
     /// Timing/token line for one model call.
     case metrics(String)
     case finished(String)
@@ -91,6 +93,8 @@ public final class Agent {
     private var savedSelection: (text: String, path: String)?
     /// Text taken out of rich files (PDF, Word…), saved for code: file and date → path.
     private var extractedTexts: [String: String] = [:]
+    /// Pages and files this turn worked with, as last reported: location → (use, title).
+    private var notedResources: [String: (use: SessionResource.Use, title: String)] = [:]
     /// Code results carrying image previews: (message, tool_result block). The model needs a
     /// preview for one step only; then it is dropped like an old screenshot.
     private var previewRefs: [(message: Int, block: Int)] = []
@@ -318,6 +322,7 @@ public final class Agent {
             attachments = dropped
         }
         sessionWords += "\n" + request
+        notedResources = [:]
         callCounts = [:]
         stalledSteps = 0
         recentSteps = []
@@ -936,6 +941,7 @@ public final class Agent {
         var content: [JSONObject] = [["type": "text", "text": context]]
         if let observation {
             current = observation.window
+            note(observation, use: .context)
             remember(observation)
             let label = "observation \(observation.stateId) of \(observation.window.app)"
             observationRefs.append(ObservationRef(message: 0, block: content.count, nested: false, label: label))
@@ -1192,6 +1198,11 @@ public final class Agent {
         onEvent(.step(words))
         recentSteps.append(words)
         let window = read.window
+        if let page = read.page {
+            noteResource(.page, .read, title: Agent.pageTitle(window), location: page)
+        } else if let document = read.document {
+            noteResource(.file, .read, title: (document as NSString).lastPathComponent, location: document)
+        }
         let saved = LongText.save(read.text, name: window.title.isEmpty ? window.app : window.title, in: workspace().workspace)
         var header = "Text of window \(window.id) (\(window.app)\(window.title.isEmpty ? "" : ", \"\(window.title)\"")): \(LongText.lines(of: read.text).count) lines, \(read.text.count) characters"
         switch read.method {
@@ -1237,6 +1248,7 @@ public final class Agent {
             throw HelperError("\(secret) holds credentials; CPU does not send them to the model.")
         }
         let document = try await Agent.offEngine { try DocumentText.read(url) }
+        noteResource(.file, .read, title: url.lastPathComponent, location: url.standardizedFileURL.path)
         let from = intValue(input["from_line"]) ?? 1
         if from <= 1 {
             let words = "读取文件 \(url.lastPathComponent)"
@@ -1344,6 +1356,12 @@ public final class Agent {
             let result = try await Agent.offEngine { try runner.run(request) }
             report = result.report
             content.append(Agent.text(report))
+            for path in result.created {
+                noteResource(.file, .created, title: (path as NSString).lastPathComponent, location: path)
+            }
+            for path in result.changed {
+                noteResource(.file, .changed, title: (path as NSString).lastPathComponent, location: path)
+            }
             if config.vision {
                 // The model can look at the images its code made instead of trusting sizes.
                 for image in result.images.prefix(2) {
@@ -1456,6 +1474,9 @@ public final class Agent {
             let batch = try await engine { $0.runBatch(window: target, steps: steps, numberFrom: from) }
             actionsMs += Agent.ms(since: started)
             lines += batch.lines
+            for file in batch.files {
+                noteWritten(file, since: started)
+            }
             ran += batch.completed
             settleMs += batch.settleMs
             waitMs += batch.waitMs
@@ -1643,6 +1664,10 @@ public final class Agent {
                 let listed = menus.isEmpty ? "" : " Its menus: \(menus.joined(separator: " · "))."
                 return ToolOutput(content: [Agent.text("\(launched.name) is running but shows no window. An act without window_id now goes to \(launched.name): use a menu command or its shortcut to open or create a document (e.g. {\"do\":\"menu\",\"path\":\"文件 ▸ 新建\"}).\(listed)")])
             }
+        }
+        if let url, url.hasPrefix("/") || url.hasPrefix("~") || url.hasPrefix("file:") {
+            let path = url.hasPrefix("file:") ? (URL(string: url)?.path ?? url) : (url as NSString).expandingTildeInPath
+            noteResource(.file, .opened, title: (path as NSString).lastPathComponent, location: path)
         }
         guard let window else {
             return ToolOutput(content: [Agent.text("Opened, but no window is showing yet (the app may still be starting or lives in the menu bar). Call windows or observe shortly.")])
@@ -1969,6 +1994,7 @@ public final class Agent {
     /// Records the observation; returns false when the window looks exactly as last observed.
     @discardableResult
     private func remember(_ observation: Observation) -> Bool {
+        note(observation, use: .opened)
         indexes[observation.stateId] = (observation.window.id, OutlineIndex(observation: observation))
         indexOrder.append(observation.stateId)
         while indexOrder.count > 12 {
@@ -1978,6 +2004,42 @@ public final class Agent {
         let changed = latest[observation.window.id]?.fingerprint != fingerprint
         latest[observation.window.id] = (observation.stateId, observation.outline, fingerprint)
         return changed
+    }
+
+    /// The page or document file a window shows, as a resource of this turn.
+    private func note(_ observation: Observation, use: SessionResource.Use) {
+        if let page = observation.page {
+            noteResource(.page, use, title: Agent.pageTitle(observation.window), location: page)
+        } else if let document = observation.document {
+            noteResource(.file, use, title: (document as NSString).lastPathComponent, location: document)
+        }
+    }
+
+    /// Reports a page or file the turn worked with, once per location unless its use grows
+    /// or its title changes (a page's title arrives as it loads). The workspace is CPU's own.
+    private func noteResource(_ kind: SessionResource.Kind, _ use: SessionResource.Use, title: String, location: String) {
+        if kind == .file, let workspace = runner?.workspace.path, location.hasPrefix(workspace + "/") {
+            return
+        }
+        let known = notedResources[location]
+        let keptUse = known.map { $0.use.weight >= use.weight ? $0.use : use } ?? use
+        let keptTitle = title.isEmpty ? (known?.title ?? "") : title
+        guard known?.use != keptUse || known?.title != keptTitle else {
+            return
+        }
+        notedResources[location] = (keptUse, keptTitle)
+        onEvent(.resource(SessionResource(kind: kind, use: keptUse, title: keptTitle, location: location)))
+    }
+
+    /// A browser window's title is its page's title, without the browser's name.
+    static func pageTitle(_ window: WindowRecord) -> String {
+        window.title.replacingOccurrences(of: #" [-–—] (Google Chrome|Microsoft Edge|Brave|Safari|Firefox|Arc)$"#, with: "", options: .regularExpression)
+    }
+
+    /// A file written while the turn ran: created if it is newer than the turn, else changed.
+    private func noteWritten(_ path: String, since start: Date) {
+        let made = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+        noteResource(.file, made >= start.addingTimeInterval(-2) ? .created : .changed, title: (path as NSString).lastPathComponent, location: path)
     }
 
     private func observationIndex(_ stateId: String?, window: CGWindowID) -> OutlineIndex? {

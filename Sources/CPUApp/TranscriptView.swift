@@ -1,3 +1,4 @@
+import AppKit
 import CPUCore
 import SwiftUI
 
@@ -11,6 +12,8 @@ struct TurnView: View {
     var live = false
     @Binding var expanded: Bool
     var size: CGFloat = 14
+    /// Pages and files shown before "还有 N 项"; nil shows them all.
+    var resourceLimit: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -26,6 +29,9 @@ struct TurnView: View {
             }
             if !turn.reply.isEmpty {
                 reply
+            }
+            if !live, !turn.resources.isEmpty {
+                ResourceList(resources: turn.resources, limit: resourceLimit, size: size)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -107,6 +113,138 @@ struct TurnView: View {
             }
         } else {
             MarkdownView(text: turn.reply, size: size)
+        }
+    }
+}
+
+/// The pages and files a turn worked with: the page the user was looking at first, then what
+/// CPU made, changed, read and opened. A page opens in the browser; a file CPU made opens in its
+/// app; any other file is shown in Finder.
+struct ResourceList: View {
+    let resources: [SessionResource]
+    var limit: Int?
+    var size: CGFloat = 14
+
+    var body: some View {
+        let ordered = resources.enumerated()
+            .sorted { ($0.element.use.order, $0.offset) < ($1.element.use.order, $1.offset) }
+            .map(\.element)
+        let shown = limit.map { Array(ordered.prefix($0)) } ?? ordered
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(shown.enumerated()), id: \.offset) { _, resource in
+                row(resource)
+            }
+            if shown.count < ordered.count {
+                Text("还有 \(ordered.count - shown.count) 项，在历史记录里")
+                    .font(.system(size: size - 3))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 22)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func row(_ resource: SessionResource) -> some View {
+        let missing = resource.kind == .file && !FileManager.default.fileExists(atPath: resource.location)
+        return Button {
+            open(resource)
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: icon(resource))
+                    .font(.system(size: size - 3))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                Text(resource.title.isEmpty ? resource.location : resource.title)
+                    .font(.system(size: size - 1.5))
+                    .foregroundStyle(missing ? Color.secondary : Color.primary.opacity(0.85))
+                    .strikethrough(missing)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(missing ? "已不在原处" : detail(resource))
+                    .font(.system(size: size - 3))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(missing)
+        .help(resource.location)
+    }
+
+    private func icon(_ resource: SessionResource) -> String {
+        switch (resource.kind, resource.use) {
+        case (.page, _):
+            return "globe"
+        case (.file, .created):
+            return "doc.badge.plus"
+        case (.file, .changed):
+            return "square.and.pencil"
+        case (.file, _):
+            return "doc.text"
+        }
+    }
+
+    /// What was done with it, and where it is: "生成 · ~/Desktop", "当时在看 · news.ycombinator.com".
+    private func detail(_ resource: SessionResource) -> String {
+        let place: String
+        switch resource.kind {
+        case .page:
+            place = URL(string: resource.location)?.host ?? resource.location
+        case .file:
+            place = ((resource.location as NSString).deletingLastPathComponent as NSString).abbreviatingWithTildeInPath
+        }
+        return "\(resource.use.words) · \(place)"
+    }
+
+    private func open(_ resource: SessionResource) {
+        switch resource.kind {
+        case .page:
+            if let url = URL(string: resource.location) {
+                NSWorkspace.shared.open(url)
+            }
+        case .file:
+            let url = URL(fileURLWithPath: resource.location)
+            if resource.use == .created {
+                NSWorkspace.shared.open(url)
+            } else {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        }
+    }
+}
+
+private extension SessionResource.Use {
+    /// The page the user was looking at first, then what CPU made, changed, read, opened.
+    var order: Int {
+        switch self {
+        case .context:
+            return 0
+        case .created:
+            return 1
+        case .changed:
+            return 2
+        case .read:
+            return 3
+        case .opened:
+            return 4
+        }
+    }
+
+    var words: String {
+        switch self {
+        case .context:
+            return "当时在看"
+        case .created:
+            return "生成"
+        case .changed:
+            return "修改"
+        case .read:
+            return "读取"
+        case .opened:
+            return "打开"
         }
     }
 }
